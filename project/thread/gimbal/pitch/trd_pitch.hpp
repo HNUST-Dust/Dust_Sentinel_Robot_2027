@@ -22,8 +22,8 @@ constexpr uint16_t kUpPitchMasterId   = 0x14;
 
 constexpr float    kPitchTorqueMax    = 3.0f;		// pitch 峰值力矩 N*m
 
-constexpr float    kUpPitchMinDeg     = -10.0f;		// 上 pitch 机械下限（度）
-constexpr float    kUpPitchMaxDeg     =  40.0f;		// 上 pitch 机械上限（度）
+constexpr float    kUpPitchMinDeg     = 60.0f;		// 上 pitch 机械下限（度）
+constexpr float    kUpPitchMaxDeg     = -20.0f;		// 上 pitch 机械上限（度）
 
 inline    DmMotor  up_pitch_motor_  {};
 

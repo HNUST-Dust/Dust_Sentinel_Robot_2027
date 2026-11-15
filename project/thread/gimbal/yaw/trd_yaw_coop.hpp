@@ -18,7 +18,7 @@ namespace instance::yaw {
 constexpr float kSmallSoftLimitRad = 45.0f * alg::math::kDegToRad;		// 小 yaw 软限 ±45°
 constexpr float kSmallHardLimitRad = 50.0f * alg::math::kDegToRad;		// 小 yaw 硬限 ±50°
 constexpr float kYawRateLimitRad   = alg::math::kPi;					// 遥控打满的世界角速度 rad/s
-constexpr float kYawTorqueMax      = 1.0f;								// yaw 峰值力矩 N*m
+constexpr float kYawTorqueMax      = 4.0f;								// yaw 峰值力矩 N*m
 
 /**
  * @brief 世界角分配器

@@ -14,7 +14,7 @@
 namespace sbus {
 
 /**
- * @brief SBUS 后处理：sa 上关整车/下开整车，sc 上为小陀螺
+ * @brief SBUS 后处理：sa 上关整车/下开整车，sb 上开/中关，sc 上为小陀螺
  * @param in   协议输出
  * @param out  已被默认映射填好的业务消息
  */
@@ -22,6 +22,8 @@ void FillOutputData(const OutputData& in, topic::remote_to::Message& out)
 {
     out.robot_ctrl   = (in.sw.sa == TwoPos::Up)   ? topic::remote_to::StartMode::Off    : topic::remote_to::StartMode::On;
     out.chassis_mode = (in.sw.sc == ThreePos::Up) ? topic::remote_to::ChassisMode::Spin : topic::remote_to::ChassisMode::Normal;
+	
+    out.custom1      = (in.sw.sb == ThreePos::Up) ? topic::remote_to::StartMode::On     : topic::remote_to::StartMode::Off;
 }
 
 } // namespace sbus

@@ -19,6 +19,7 @@
 #include "Init_entry.hpp"
 #include "Irq_handlers.h"
 #include "remote_to.hpp"
+#include "imu_to.hpp"
 #include "angle.hpp"
 #include "pid.hpp"
 #include "log.hpp"
@@ -49,17 +50,18 @@ using namespace alg::math;
 
 static Thread<2048> thread_{};
 
-static alg::pid::Pid up_pid_   {};								// 上 pitch 位置环
-static gimbal::DtMeter dt_meter_ {};							// 控制周期测量
+static alg::pid::Pid   up_pid_   {};									// 上 pitch 位置环
+static gimbal::DtMeter dt_meter_ {};									// 控制周期测量
 
-static topic::remote_to::Message remote_ {};					// 遥控最新状态，读失败保留旧值
+static topic::remote_to::Message remote_  {};							// 遥控最新状态，读失败保留旧值
+static topic::imu_to::Message    imu_msg_ {};							// IMU 最新状态，读失败保留旧值
 
-static constexpr uint32_t kLostCheckPeriod = 100;				// 掉线检测周期（Task 拍数）
+static constexpr uint32_t kLostCheckPeriod = 100;						// 掉线检测周期（Task 拍数）
 
-static gimbal::StallWatch remote_watch_ {};						// 遥控停发检测（默认 100 拍）
+static gimbal::StallWatch remote_watch_ {};								// 遥控停发检测（默认 100 拍）
 static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检测
 
-static bool g_set_zero_up = false;								// 上 pitch 设零请求，执行后自清
+static bool g_set_zero_up = false;										// 上 pitch 设零请求，执行后自清
 
 /**
  * @brief Retry 钩子：设零与未使能恢复，阻塞等待停稳
@@ -112,7 +114,8 @@ static TaskResult Task(void* context)
     const float dt = dt_meter_.Update();
 
     // 直接读话题：每拍取最新状态，不积压历史通知；读失败保留上一帧值
-    zbus_chan_read(&pub_remote_to, &remote_, K_NO_WAIT);
+    zbus_chan_read(&pub_remote_to, &remote_,  K_NO_WAIT);
+    zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT);
 
     // 输入停更或整车关闭：处置交给 OnRetry
     if (remote_watch_.Update(remote_.version) || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
@@ -132,23 +135,22 @@ static TaskResult Task(void* context)
 
     uint8_t frame[8];
 
-	auto snap = up_pitch_motor_.ReadAll();
-
-	const float up_now_rad	   = snap.radian;
-    // 遥控 [-1,1] 线性映射到机械限位，范围已由 remote 处理
-    const float up_target_deg  = kUpPitchMinDeg + (kUpPitchMaxDeg - kUpPitchMinDeg) * (remote_.pitch + 1.0f) * 0.5f;
-    const float up_target_rad  = up_target_deg * kDegToRad;
+    const float up_now_rad	   = imu_msg_.pitch * kDegToRad;	// IMU 发布单位为度，取反统一方向后转 rad
+    // custom1=On 用 var 目标角；Off 用遥控 [-1,1] 线性映射到机械限位
+    const float up_target_deg  = (remote_.custom1 == topic::remote_to::StartMode::On) ? target_deg_ : kUpPitchMinDeg + (kUpPitchMaxDeg - kUpPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f;
+    const float up_target_rad  = up_target_deg  * kDegToRad;
     const float up_err 	   	   = WrapRad(up_now_rad - up_target_rad);
 
+    // 目标与反馈（度）
     const float pid_torque 	   = up_pid_.Calc(0.0f, up_err, dt);
     const float gravity_torque = GravityTorque(up_now_rad);
     const float up_torque 	   = std::clamp(pid_torque + gravity_torque, -kPitchTorqueMax, kPitchTorqueMax);
-
-    up_pitch_motor_.SetTargetTorque(gravity_torque);
+	
+    up_pitch_motor_.SetTargetTorque(up_torque);
     up_pitch_motor_.PackCtrlFrame(frame);
     gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
-
-    DUST_LOG_DBG("pitch_track", "%.2f,%.2f,%.3f", static_cast<double>(up_target_deg), static_cast<double>(snap.angle), static_cast<double>(snap.torque));
+    
+	DUST_LOG_DBG("pitch_track", "%f,%f", static_cast<double>(up_target_deg), static_cast<double>(imu_msg_.pitch));
 
     return TaskResult::Continue;
 }
@@ -174,9 +176,9 @@ static bool thread_init()
     // 上 pitch 位置环：输出力矩
     alg::pid::Pid::Config pid_cfg {};
 
-    pid_cfg.kp     = 6.f;
+    pid_cfg.kp     = 1.2f;
     pid_cfg.ki     = 0.0f;
-    pid_cfg.kd     = 0.085f;
+    pid_cfg.kd     = 0.08f;
     pid_cfg.outMax = kPitchTorqueMax;
 
     up_pid_.Init(pid_cfg);

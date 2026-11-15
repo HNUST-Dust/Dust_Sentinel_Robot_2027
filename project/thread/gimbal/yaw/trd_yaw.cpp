@@ -51,6 +51,9 @@ static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检
 
 static bool g_set_zero_big   = false;							// 大 yaw 设零请求，执行后自清
 
+static float test_torque_ = 0.0f;								// 摩擦测试开环力矩 N*m
+static bool  test_enable_ = false;								// 摩擦测试开环开关
+
 /**
  * @brief Retry 钩子：设零与未使能恢复，阻塞等待停稳
  * @param context 未使用
@@ -95,6 +98,7 @@ static bool OnRetry(void* context)
 
     if (!gimbal::Enabled(big_yaw_motor_))
 	{
+        DUST_LOG_WRN("yaw not enabled: err=%d", static_cast<int>(big_yaw_motor_.ReadAll().err));
         if (gimbal::Enable(big_yaw_motor_, &user_can1_msgq, kBigYawCanId)) {
             DUST_LOG_INF("yaw re-enabled");
         }
@@ -142,6 +146,25 @@ static TaskResult Task(void* context)
 
     const DmMotor::Snapshot big = big_yaw_motor_.ReadAll();
 
+    // 摩擦测试：开环恒力矩，绕过位置环，直接下发 test_torque_
+    if (test_enable_) {
+        uint8_t test_frame[8];
+
+        big_yaw_motor_.SetTargetTorque(test_torque_);
+        big_yaw_motor_.PackCtrlFrame(test_frame);
+        gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, test_frame);
+
+        // ctrl 里实际打包的值(rad/rad·s⁻¹/N·m)、下发帧尾 4 字节、回报力矩(mN*m)、角速度(mrad/s)、角度(mrad)、err、MX 温度
+        DUST_LOG_DBG("yaw_friction", "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                     static_cast<int>(big_yaw_motor_.GetTargetRadian() * 1000.0f), static_cast<int>(big_yaw_motor_.GetTargetOmega() * 1000.0f),
+                     static_cast<int>(big_yaw_motor_.GetTargetTorque() * 1000.0f), static_cast<int>(test_frame[4]),
+                     static_cast<int>(test_frame[5]), static_cast<int>(test_frame[6]), static_cast<int>(test_frame[7]),
+                     static_cast<int>(big.torque * 1000.0f), static_cast<int>(big.omega * 1000.0f),
+                     static_cast<int>(big.err), static_cast<int>(big.tmos));
+
+        return TaskResult::Continue;
+    }
+
     // 达妙反馈已是输出轴角度与角速度；大 yaw 逆时针为负，取反统一成逆时针为正
     // 多圈累计值归一化到 [-π, π]
     const float big_joint   = WrapRad(-big.radian);
@@ -169,7 +192,7 @@ static TaskResult Task(void* context)
     // 大 yaw 物理方向相反，输出取反
     uint8_t frame[8];
 
-    big_yaw_motor_.SetTargetTorque(-big_torque);
+    big_yaw_motor_.SetTargetTorque(-0);
     big_yaw_motor_.PackCtrlFrame(frame);
     gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
 
@@ -223,6 +246,9 @@ static bool thread_start()
 CAN_RX_HANDLER(USER_RX_CAN1, kBigYawMasterId,   [](uint8_t* data) { big_yaw_motor_  .CanCpltRxCallback(data); });
 
 REGISTER_SHELL_VAR("yaw_zero_big",   g_set_zero_big);
+
+REGISTER_SHELL_VAR("yaw_test_torque", test_torque_);
+REGISTER_SHELL_VAR("yaw_test_enable", test_enable_);
 
 REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, nullptr, "yaw_init");
 REGISTER_THREAD(thread_start, MidThread, ContinueOnFail, "yaw_start");

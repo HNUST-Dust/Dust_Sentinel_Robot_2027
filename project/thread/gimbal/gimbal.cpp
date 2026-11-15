@@ -31,7 +31,7 @@ void SendCmd(k_msgq* msgq, uint16_t can_id, const uint8_t (&data)[8])
     topic::to_can_tx::Message msg{};
 
     msg.tx_id   = can_id;
-    msg.version = ++tx_seq;
+    msg.version = tx_seq++;
     memcpy(msg.data, data, 8);
 
     const int ret = k_msgq_put(msgq, &msg, K_NO_WAIT);
@@ -63,9 +63,7 @@ bool Enable(DmMotor& motor, k_msgq* msgq, uint16_t can_id)
 
     const DmMotor::Snapshot before = motor.ReadAll();
 
-    DUST_LOG_WRN("gimbal not enabled: err=%d, clearing err", static_cast<int>(before.err));
-
-    if (before.err != DmErrorStatus::Enable) 
+    if (before.err != DmErrorStatus::Enable)
 	{
         motor.PackCmdFrame(frame, DmMotor::Cmd::ClearErr);
         SendCmd(msgq, can_id, frame);
