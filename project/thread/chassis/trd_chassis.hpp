@@ -35,6 +35,15 @@ inline float chassis_v = 2.0f;
 // 小陀螺目标旋转速度
 inline float chassis_w = 15.0f;
 
+// 摩擦前馈（辨识结果，单位 A）：I = a·tanh(ω/ωs) + b·ω
+// a/b 来自 scripts/chassis_friction.py 模型二，正反分开；ωs 为符号函数平滑宽度
+constexpr float kFricA[N_Wheel]    = { 0.33983f, 0.27259f, 0.53885f, 0.49975f };	// 正转库仑
+constexpr float kFricB[N_Wheel]    = { 0.01966f, 0.02159f, 0.04012f, 0.02587f };	// 正转黏性
+constexpr float kFricANeg[N_Wheel] = { 0.31649f, 0.28193f, 0.47052f, 0.50784f };	// 反转库仑
+constexpr float kFricBNeg[N_Wheel] = { 0.02408f, 0.02293f, 0.04561f, 0.02563f };	// 反转黏性
+
+constexpr float kFricSmooth = 0.5f;		// 平滑宽度 rad/s，低于此值用 tanh 过渡代替 sgn
+
 inline motor::dji::DjiC620 chassis_motor_[N_Wheel] {};
 
 } // namespace instance::chassis

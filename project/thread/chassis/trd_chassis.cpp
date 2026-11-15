@@ -31,6 +31,23 @@ static Thread<2048> thread_{};
 static alg::pid::Pid pid_[N_Wheel] {};
 
 /**
+ * @brief 摩擦前馈电流：按该轮辨识的库仑+黏性模型算出维持该转速所需电流
+ * @param wheel 轮号
+ * @param omega 输出轴角速度 rad/s
+ * @return 前馈电流 A
+ */
+static float FrictionFeedforward(uint8_t wheel, float omega)
+{
+    // tanh 平滑代替 sgn：|omega| >> kFricSmooth 时趋近 ±1，过零处连续
+    const float s = std::tanh(omega / kFricSmooth);
+
+    const float a = (omega >= 0.0f) ? kFricA[wheel] : kFricANeg[wheel];
+    const float b = (omega >= 0.0f) ? kFricB[wheel] : kFricBNeg[wheel];
+
+    return a * s + b * omega;
+}
+
+/**
  * @brief 任务单拍：读遥控速度 → 逆运动学 → 四轮角速度环 → 组帧进 CAN 发送队列
  * @param context 未使用
  * @return Continue=正常
@@ -67,6 +84,7 @@ static TaskResult Task(void* context)
 	}
 
 	float current[N_Wheel] {};
+	float target[N_Wheel] {};
 
 	if (msg.robot_ctrl == topic::remote_to::StartMode::Off)
 	{
@@ -84,8 +102,6 @@ static TaskResult Task(void* context)
 		const float vy =  msg.chassisy * chassis_v / kWheelRadius;
 		const float wz = (msg.chassis_mode == topic::remote_to::ChassisMode::Spin) ? chassis_w : 0.0f;
 
-		float target[N_Wheel] {};
-
 		target[0] = (-vx + vy) * kSqrt2 + wz;
 		target[1] = (-vx - vy) * kSqrt2 + wz;
 		target[2] = ( vx - vy) * kSqrt2 + wz;
@@ -95,7 +111,8 @@ static TaskResult Task(void* context)
 		{
 			const float omega = chassis_motor_[i].ReadAll().omega;
 
-			current[i] = pid_[i].Calc(target[i], omega);
+			// 摩擦前馈补偿维持该转速所需的电流，PID 只修残差
+			current[i] = pid_[i].Calc(target[i], omega) + FrictionFeedforward(i, target[i]);
 		}
 	}
 
@@ -128,7 +145,6 @@ bool thread_init()
 	static constexpr float kKp[N_Wheel] = { 0.2745f, 0.2598f, 0.8890f, 0.5103f };
 	alg::pid::Pid::Config pid_cfg{};
 
-	pid_cfg.kd      = 0.0f;
 	pid_cfg.outMax  = 5.0f;   // C620 电流上限
 	pid_cfg.iOutMax = 2.0f;   // 积分项限幅，防止换向时积分饱和拖慢响应
 
