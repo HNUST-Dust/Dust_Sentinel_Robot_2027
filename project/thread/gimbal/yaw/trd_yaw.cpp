@@ -38,21 +38,18 @@ static bool coop_ready_ = false;								// 已用当前姿态初始化
 static alg::pid::Pid   big_pid_  {};							// 大 yaw 关节角环
 static gimbal::DtMeter dt_meter_ {};							// 控制周期测量
 
-static constexpr uint32_t kImuTimeoutMs = 20;					// IMU 话题超时，超过即判停更
-
 static topic::remote_to::Message remote_  {};					// 遥控最新状态，读失败保留旧值
 static topic::imu_to::Message    imu_msg_ {};					// IMU 最新状态，读失败保留旧值
-static uint32_t                  imu_ms_  = 0;					// IMU 最近一次读取成功时刻
 
 static constexpr uint32_t kLostCheckPeriod = 100;				// 掉线检测周期（Task 拍数）
 
 static gimbal::StallWatch remote_watch_ {};						// 遥控停发检测（默认 100 拍）
+static gimbal::StallWatch imu_watch_    {};						// IMU 停发检测（默认 100 拍）
 static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检测
 
 static bool g_set_zero_big   = false;							// 大 yaw 设零请求，执行后自清
 
-static float test_torque_ = 0.0f;								// 摩擦测试开环力矩 N*m
-static bool  test_enable_ = false;								// 摩擦测试开环开关
+static float target_deg_ = 0.0f;								// 大 yaw 目标关节角（度），由 var 设定
 
 /**
  * @brief Retry 钩子：设零与未使能恢复，阻塞等待停稳
@@ -63,10 +60,8 @@ static bool OnRetry(void* context)
 {
     (void)context;
 
-    const uint32_t now = k_uptime_get_32();
-
     const bool remote_alive = !remote_watch_.Timeout();
-    const bool imu_alive    = (imu_ms_ != 0) && (now - imu_ms_ < kImuTimeoutMs);
+    const bool imu_alive    = !imu_watch_.Timeout();
 
     if (!remote_alive || remote_.robot_ctrl == topic::remote_to::StartMode::Off)
 	{
@@ -119,19 +114,14 @@ static TaskResult Task(void* context)
     const float dt = dt_meter_.Update();
 
     // 直接读话题：每拍取最新状态，不积压历史通知；读失败保留上一帧值
-    const uint32_t now = k_uptime_get_32();
-
-    zbus_chan_read(&pub_remote_to, &remote_, K_NO_WAIT);
-
-    if (zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT) == 0) {
-        imu_ms_ = now;
-    }
+    zbus_chan_read(&pub_remote_to, &remote_,  K_NO_WAIT);
+    zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT);
 
     // 输入停更或整车关闭：处置交给 OnRetry
     const bool remote_lost = remote_watch_.Update(remote_.version);
-    const bool imu_alive   = (imu_ms_ != 0) && (now - imu_ms_ < kImuTimeoutMs);
+    const bool imu_lost    = imu_watch_.Update(imu_msg_.version);
 
-    if (remote_lost || remote_.robot_ctrl == topic::remote_to::StartMode::Off || !imu_alive) {
+    if (remote_lost || imu_lost || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
         return TaskResult::Retry;
     }
 
@@ -145,25 +135,6 @@ static TaskResult Task(void* context)
     }
 
     const DmMotor::Snapshot big = big_yaw_motor_.ReadAll();
-
-    // 摩擦测试：开环恒力矩，绕过位置环，直接下发 test_torque_
-    if (test_enable_) {
-        uint8_t test_frame[8];
-
-        big_yaw_motor_.SetTargetTorque(test_torque_);
-        big_yaw_motor_.PackCtrlFrame(test_frame);
-        gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, test_frame);
-
-        // ctrl 里实际打包的值(rad/rad·s⁻¹/N·m)、下发帧尾 4 字节、回报力矩(mN*m)、角速度(mrad/s)、角度(mrad)、err、MX 温度
-        DUST_LOG_DBG("yaw_friction", "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-                     static_cast<int>(big_yaw_motor_.GetTargetRadian() * 1000.0f), static_cast<int>(big_yaw_motor_.GetTargetOmega() * 1000.0f),
-                     static_cast<int>(big_yaw_motor_.GetTargetTorque() * 1000.0f), static_cast<int>(test_frame[4]),
-                     static_cast<int>(test_frame[5]), static_cast<int>(test_frame[6]), static_cast<int>(test_frame[7]),
-                     static_cast<int>(big.torque * 1000.0f), static_cast<int>(big.omega * 1000.0f),
-                     static_cast<int>(big.err), static_cast<int>(big.tmos));
-
-        return TaskResult::Continue;
-    }
 
     // 达妙反馈已是输出轴角度与角速度；大 yaw 逆时针为负，取反统一成逆时针为正
     // 多圈累计值归一化到 [-π, π]
@@ -182,7 +153,12 @@ static TaskResult Task(void* context)
     float small_target = 0.0f;
     float world_target = 0.0f;
 
-    coop_.Update(remote_.yaw, world_yaw, big_joint, small_joint, kControlDT, big_target, small_target, world_target);
+    // custom1=On 用 var 目标角；Off 用遥控协同
+    if (remote_.custom1 == topic::remote_to::StartMode::On) {
+        big_target = WrapRad(target_deg_ * kDegToRad);
+    } else {
+        coop_.Update(remote_.yaw, world_yaw, big_joint, small_joint, dt, big_target, small_target, world_target);
+    }
 
     // 大轴闭环关节角误差，PID 目标恒为 0
     const float big_err = WrapRad(big_joint - big_target);
@@ -247,8 +223,11 @@ CAN_RX_HANDLER(USER_RX_CAN1, kBigYawMasterId,   [](uint8_t* data) { big_yaw_moto
 
 REGISTER_SHELL_VAR("yaw_zero_big",   g_set_zero_big);
 
-REGISTER_SHELL_VAR("yaw_test_torque", test_torque_);
-REGISTER_SHELL_VAR("yaw_test_enable", test_enable_);
+REGISTER_SHELL_VAR("yaw_big_target", target_deg_);
+
+REGISTER_SHELL_VAR("yaw_big_kp",     big_pid_.GetKp());
+REGISTER_SHELL_VAR("yaw_big_ki",     big_pid_.GetKi());
+REGISTER_SHELL_VAR("yaw_big_kd",     big_pid_.GetKd());
 
 REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, nullptr, "yaw_init");
 REGISTER_THREAD(thread_start, MidThread, ContinueOnFail, "yaw_start");

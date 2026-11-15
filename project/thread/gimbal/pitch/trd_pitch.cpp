@@ -59,6 +59,7 @@ static topic::imu_to::Message    imu_msg_ {};							// IMU 最新状态，读失
 static constexpr uint32_t kLostCheckPeriod = 100;						// 掉线检测周期（Task 拍数）
 
 static gimbal::StallWatch remote_watch_ {};								// 遥控停发检测（默认 100 拍）
+static gimbal::StallWatch imu_watch_    {};								// IMU 停发检测（默认 100 拍）
 static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检测
 
 static bool g_set_zero_up = false;										// 上 pitch 设零请求，执行后自清
@@ -80,6 +81,17 @@ static bool OnRetry(void* context)
                      static_cast<unsigned>(remote_watch_.Stall()), static_cast<int>(remote_.robot_ctrl),
                      static_cast<unsigned>(remote_.version));
         up_pitch_motor_.PackCmdFrame(frame, DmMotor::Cmd::Disable);
+        gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
+
+        return true;
+    }
+
+    if (imu_watch_.Timeout())
+	{
+        uint8_t frame[8];
+
+        up_pitch_motor_.SetTargetTorque(0.0f);
+        up_pitch_motor_.PackCtrlFrame(frame);
         gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
 
         return true;
@@ -118,7 +130,10 @@ static TaskResult Task(void* context)
     zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT);
 
     // 输入停更或整车关闭：处置交给 OnRetry
-    if (remote_watch_.Update(remote_.version) || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
+    const bool remote_lost = remote_watch_.Update(remote_.version);
+    const bool imu_lost    = imu_watch_.Update(imu_msg_.version);
+
+    if (remote_lost || imu_lost || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
         return TaskResult::Retry;
     }
 
@@ -146,7 +161,7 @@ static TaskResult Task(void* context)
     const float gravity_torque = GravityTorque(up_now_rad);
     const float up_torque 	   = std::clamp(pid_torque + gravity_torque, -kPitchTorqueMax, kPitchTorqueMax);
 	
-    up_pitch_motor_.SetTargetTorque(up_torque);
+    up_pitch_motor_.SetTargetTorque(0);
     up_pitch_motor_.PackCtrlFrame(frame);
     gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
     
