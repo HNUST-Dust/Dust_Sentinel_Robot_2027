@@ -41,8 +41,7 @@ void Coop::Init(float big_joint, float world_yaw)
  * @param small_target 输出：小 yaw 目标关节角 rad
  * @param world_target 输出：世界目标角 rad（小轴闭环用）
  */
-void Coop::Update(float remote_yaw,  float  world_yaw,    float big_joint,   float small_joint, float dt,
-                  float& big_target, float& small_target, float& world_target)
+void Coop::Update(float remote_yaw, float world_yaw, float big_joint, float small_joint, float dt, float& big_target, float& small_target, float& world_target)
 {
     // 世界目标角速度积分成世界目标角
     world_ref_ = WrapRad(world_ref_ + remote_yaw * kYawRateLimitRad * dt);
