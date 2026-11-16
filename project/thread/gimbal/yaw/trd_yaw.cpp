@@ -12,6 +12,8 @@
 #include <zephyr/zbus/zbus.h>
 #include "trd_yaw.hpp"
 #include "gimbal.hpp"
+#include "dt_meter.hpp"
+#include "stall_watch.hpp"
 #include "trd_yaw_coop.hpp"
 #include "to_can_tx.hpp"
 #include "thread.hpp"
@@ -36,15 +38,15 @@ static Coop coop_ {};											// 大小 yaw 世界角分配
 static bool coop_ready_ = false;								// 已用当前姿态初始化
 
 static alg::pid::Pid   big_pid_  {};							// 大 yaw 关节角环
-static gimbal::DtMeter dt_meter_ {};							// 控制周期测量
+static alg::monitor::DtMeter dt_meter_ {};						// 控制周期测量
 
 static topic::remote_to::Message remote_  {};					// 遥控最新状态，读失败保留旧值
 static topic::imu_to::Message    imu_msg_ {};					// IMU 最新状态，读失败保留旧值
 
 static constexpr uint32_t kLostCheckPeriod = 100;				// 掉线检测周期（Task 拍数）
 
-static gimbal::StallWatch remote_watch_ {};						// 遥控停发检测（默认 100 拍）
-static gimbal::StallWatch imu_watch_    {};						// IMU 停发检测（默认 100 拍）
+static alg::monitor::StallWatch remote_watch_ {};				// 遥控停发检测（默认 100 拍）
+static alg::monitor::StallWatch imu_watch_    {};				// IMU 停发检测（默认 100 拍）
 static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检测
 
 static bool g_set_zero_big   = false;							// 大 yaw 设零请求，执行后自清

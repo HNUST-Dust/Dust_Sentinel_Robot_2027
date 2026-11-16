@@ -1,4 +1,4 @@
-# 用户层 algorithm 模块 — 门禁 DUST_CHK_XXX（跟架构层 algorithm 同风格）
+# 用户层 algorithm 模块 — 校验 DUST_CHK_XXX / 数学 DUST_MATH_XXX / 监测 DUST_MON_XXX
 # Kconfig 由 zephyr/module.yml 自动加载（build.kconfig: Kconfig），无需 rsource。
 #
 # 新增一个算法时照这块追加：
@@ -14,3 +14,15 @@ config DUST_MATH_ANGLE
     default n
     help
       角度归一化（WrapRad / WrapDeg）。
+
+config DUST_MON_DTMETER
+    bool "control period meter"
+    default n
+    help
+      控制周期测量：相邻两拍 cycle 差值换算成秒，供惯性前馈和积分使用。
+
+config DUST_MON_STALLWATCH
+    bool "frame stall watch"
+    default n
+    help
+      帧序号停更检测：话题 version 连续不变即判对端停发。

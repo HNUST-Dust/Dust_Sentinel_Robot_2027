@@ -55,6 +55,7 @@ config TRD_CHASSIS
     select DUST_MOD_DEV_MOTOR_DJI
     select DUST_CTL_PID
     select DUST_FLT_LPF
+    select DUST_MON_DTMETER
     select DUST_TPC_TO_CAN_TX
     select DUST_TPC_REMOTE_TO
     help
@@ -70,6 +71,8 @@ config TRD_YAW
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
+    select DUST_MON_DTMETER
+    select DUST_MON_STALLWATCH
     help
       Initialize big yaw on CAN1 and small yaw on CAN0, without enabling motors.
 
@@ -79,6 +82,8 @@ config TRD_PITCH
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
+    select DUST_MON_DTMETER
+    select DUST_MON_STALLWATCH
     help
       Initialize up and down pitch on CAN0.
 

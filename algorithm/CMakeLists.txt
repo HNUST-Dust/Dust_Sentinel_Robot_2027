@@ -1,4 +1,4 @@
-# 用户层 algorithm 装配 — 门禁 DUST_CHK_XXX
+# 用户层 algorithm 装配 — 校验 DUST_CHK_XXX / 数学 DUST_MATH_XXX / 监测 DUST_MON_XXX
 # 本文件由 project/CMakeLists.txt 的 add_subdirectory(${APP_ALGORITHM}) 引入
 #
 # 新增一个算法时照这块追加：
@@ -10,4 +10,12 @@
 
 if(CONFIG_DUST_MATH_ANGLE)
 	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/math/angle)
+endif()
+
+if(CONFIG_DUST_MON_DTMETER)
+	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/monitor/dt_meter)
+endif()
+
+if(CONFIG_DUST_MON_STALLWATCH)
+	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/monitor/stall_watch)
 endif()

@@ -30,19 +30,35 @@ constexpr uint16_t kControlTxId = 0x200;
 constexpr float	   kWheelRadius = 0.285f;	// 轮半径 m（570mm 直径）
 
 // 目标 v 比例（遥控归一化 [-1,1] 乘以该值）
-inline float chassis_v = 2.0f;
+inline float chassis_v = 5.0f;
 
 // 小陀螺目标旋转速度
-inline float chassis_w = 15.0f;
+inline float chassis_w = 10.0f;
 
 // 摩擦前馈（辨识结果，单位 A）：I = a·tanh(ω/ωs) + b·ω
-// a/b 来自 scripts/chassis_friction.py 模型二，正反分开；ωs 为符号函数平滑宽度
-constexpr float kFricA[N_Wheel]    = { 0.33983f, 0.27259f, 0.53885f, 0.49975f };	// 正转库仑
-constexpr float kFricB[N_Wheel]    = { 0.01966f, 0.02159f, 0.04012f, 0.02587f };	// 正转黏性
-constexpr float kFricANeg[N_Wheel] = { 0.31649f, 0.28193f, 0.47052f, 0.50784f };	// 反转库仑
-constexpr float kFricBNeg[N_Wheel] = { 0.02408f, 0.02293f, 0.04561f, 0.02563f };	// 反转黏性
+constexpr float kFricA[N_Wheel]    		= { 0.33983f, 0.27259f, 0.53885f, 0.49975f };		// 正转库仑
+constexpr float kFricB[N_Wheel]    		= { 0.01966f, 0.02159f, 0.04012f, 0.02587f };		// 正转黏性
+constexpr float kFricANeg[N_Wheel] 		= { 0.31649f, 0.28193f, 0.47052f, 0.50784f };		// 反转库仑
+constexpr float kFricBNeg[N_Wheel] 	    = { 0.02408f, 0.02293f, 0.04561f, 0.02563f };		// 反转黏性
 
-constexpr float kFricSmooth = 0.5f;		// 平滑宽度 rad/s，低于此值用 tanh 过渡代替 sgn
+// 静摩擦（起转电流，scripts/chassis_model_ident.py 辨识）：低速时取代库仑值，随转速衰减
+constexpr float kFricStatic[N_Wheel]    = { 0.65f, 0.63f, 0.84f, 0.74f };					// 正转起转
+constexpr float kFricStaticNeg[N_Wheel] = { 0.44f, 0.53f, 1.15f, 0.68f };					// 反转起转
+
+constexpr float kFricSmooth 	  		= 0.5f;																// 静摩擦随实际转速衰减的宽度 rad/s
+constexpr float kFricStaticSmooth 		= 0.05f;															// 方向项平滑宽度 rad/s，几乎阶跃
+
+// 等效惯量（scripts/chassis_inertia_ident.py 辨识，单位 A/(rad/s^2)）
+constexpr float kJEq[N_Wheel] 			= { 0.01816f, 0.01951f, 0.01997f, 0.01881f };
+
+// 速度 PI 设计目标（选定值，非实测带宽）：J*s^2+(b+Kp)*s+Ki = J*(s+wn)^2。
+// b 取正反向均值；Kp = 2*zeta*wn*J-b，Ki = J*wn^2。
+constexpr float kSpeedLoopWn 			= 10.0f;		// 自然角频率 rad/s
+constexpr float kSpeedLoopZeta 			= 1.0f;			// 名义线性模型临界阻尼
+constexpr float kControlCurrentMax  	= 5.0f;			// PI 与前馈相加后的总电流限幅 A
+constexpr float kIntegralCurrentMax 	= 2.0f;			// 积分补偿限幅 A
+
+constexpr float kAccelLimit 			= 200.0f;		// 加速度前馈限幅 rad/s^2，抑制阶跃尖峰
 
 inline motor::dji::DjiC620 chassis_motor_[N_Wheel] {};
 
