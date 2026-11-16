@@ -144,7 +144,7 @@ static TaskResult Task(void* context)
 	}
 
 	DUST_LOG_DBG("wheel12", "%.2f,%.2f,%.2f,%.2f", static_cast<double>(feedback[0].omega), static_cast<double>(feedback[1].omega),
-	            											 static_cast<double>(feedback[2].omega), static_cast<double>(feedback[3].omega));
+	             static_cast<double>(feedback[2].omega), static_cast<double>(feedback[3].omega));
 
 	// 逆运动学反解：轮角速度 → 底盘实际速度 (m/s)
 	{
