@@ -1,4 +1,4 @@
-"""上 pitch 采集：摆动 + 静止两段，记录电机角、IMU 姿态与 EKF 内部状态。
+"""下 pitch 采集：摆动 + 静止两段，记录电机角、IMU 姿态与 EKF 内部状态。
 
 只读日志，不发任何控制命令。
 
@@ -192,7 +192,7 @@ def stationary_tail(t, phase, motor, wnorm, stable):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="上 pitch 采集（摆动+静止，含 EKF 内部状态）")
+    parser = argparse.ArgumentParser(description="下 pitch 采集（摆动+静止，含 EKF 内部状态）")
     parser.add_argument("--port", default="COM8")
     parser.add_argument("--baud", type=int, default=BAUD)
     parser.add_argument("--seconds", type=float, default=30.0, help="每段采集时长（秒）")

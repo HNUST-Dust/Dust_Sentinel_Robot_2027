@@ -1,9 +1,9 @@
 /**
  * @file trd_pitch.cpp
  * @author qingyu
- * @brief 上 pitch 达妙电机初始化与反馈接入
- * @version 0.2
- * @date 2026-11-14
+ * @brief 双 pitch 达妙电机协同控制
+ * @version 0.4
+ * @date 2026-11-16
  *
  * @copyright Copyright (c) 2026
  *
@@ -13,15 +13,16 @@
 #include <algorithm>
 #include <cmath>
 #include "trd_pitch.hpp"
+#include "dm.hpp"
 #include "gimbal.hpp"
 #include "dt_meter.hpp"
 #include "stall_watch.hpp"
 #include "to_can_tx.hpp"
+#include "remote_to.hpp"
+#include "imu_to.hpp"
 #include "thread.hpp"
 #include "Init_entry.hpp"
 #include "Irq_handlers.h"
-#include "remote_to.hpp"
-#include "imu_to.hpp"
 #include "angle.hpp"
 #include "pid.hpp"
 #include "log.hpp"
@@ -29,42 +30,54 @@
 
 namespace thread::pitch {
 
-// 本次起动力矩拟合：g(theta)=0.041619*sin(theta)+0.315195*cos(theta)，theta 为 rad。
-// 默认先验证 50%；var 可调至 0 进行对照，静摩擦补偿暂不加入。
-static float gravity_scale_ = 1.0f;				// 重力前馈比例，0=关闭
-static float target_deg_    = 0.0f;				// 目标角度（度），由 var 设定
-
-/**
- * @brief 重力前馈力矩
- * @param pitch_rad 电机反馈角度，单位 rad
- * @return 补偿力矩，单位 N*m
- */
-static float GravityTorque(float pitch_rad)
-{
-    if (!std::isfinite(pitch_rad) || !std::isfinite(gravity_scale_)) return 0.0f;
-    const float scale = std::clamp(gravity_scale_, 0.0f, 1.0f);
-    return scale * (0.041619f * std::sin(pitch_rad) + 0.315195f * std::cos(pitch_rad));
-}
-
 using namespace instance;
 using namespace instance::pitch;
 using namespace alg::math;
 
 static Thread<2048> thread_{};
 
-static alg::pid::Pid   up_pid_   {};									// 上 pitch 位置环
-static alg::monitor::DtMeter dt_meter_ {};								// 控制周期测量
+static alg::monitor::DtMeter dt_meter_ {};											// 控制周期测量
 
-static topic::remote_to::Message remote_  {};							// 遥控最新状态，读失败保留旧值
-static topic::imu_to::Message    imu_msg_ {};							// IMU 最新状态，读失败保留旧值
+static topic::remote_to::Message remote_  {};										// 遥控最新状态，读失败保留旧值
+static topic::imu_to::Message    imu_msg_ {};										// IMU 最新状态，读失败保留旧值
 
-static constexpr uint32_t kLostCheckPeriod = 100;						// 掉线检测周期（Task 拍数）
+static constexpr uint32_t kLostCheckPeriod = 100;
 
-static alg::monitor::StallWatch remote_watch_ {};						// 遥控停发检测（默认 100 拍）
-static alg::monitor::StallWatch imu_watch_    {};						// IMU 停发检测（默认 100 拍）
-static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检测
+static alg::monitor::StallWatch remote_watch_ {};									// 遥控停发检测（默认 100 拍）
+static alg::monitor::StallWatch imu_watch_    {};									// IMU 停发检测（默认 100 拍）
 
-static bool g_set_zero_up = false;										// 上 pitch 设零请求，执行后自清
+#if defined(CONFIG_TRD_PITCH_UP)
+
+static alg::pid::Pid up_pid_     {};												// 上 pitch 位置环
+static gimbal::LostWatch 		up_motor_watch_   { kLostCheckPeriod };		// 上 pitch 电机掉线检测
+static float up_target_deg_   = 0.0f;												// 上 pitch 目标角（度），通过 var 设定
+static bool  g_set_zero_up   = false;												// 上 pitch 设零请求，执行后自清
+
+#endif
+
+#if defined(CONFIG_TRD_PITCH_DOWN)
+
+static alg::pid::Pid down_pid_   {};												// 下 pitch 位置环
+static gimbal::LostWatch 		down_motor_watch_ { kLostCheckPeriod };		// 下 pitch 电机掉线检测
+static float down_target_deg_ = 10.0f;												// 下 pitch 目标角（度），通过 var 设定
+static bool  g_set_zero_down = false;												// 下 pitch 设零请求，执行后自清
+
+#endif
+
+#if defined(CONFIG_TRD_PITCH_UP)
+
+/**
+ * @brief 上 pitch 重力前馈力矩
+ * @param pitch_rad 电机反馈角度，单位 rad
+ * @return 补偿力矩，单位 N*m
+ */
+static float GravityTorque(float pitch_rad)
+{
+    if (!std::isfinite(pitch_rad)) return 0.0f;
+    return 0.041619f * std::sin(pitch_rad) + 0.315195f * std::cos(pitch_rad);
+}
+
+#endif
 
 /**
  * @brief Retry 钩子：设零与未使能恢复，阻塞等待停稳
@@ -75,43 +88,89 @@ static bool OnRetry(void* context)
 {
     (void)context;
 
+	#if defined(CONFIG_TRD_PITCH_UP)
+	{
+		up_pid_.Reset();
+	}
+	#endif
+
+	#if defined(CONFIG_TRD_PITCH_DOWN)
+	{
+		down_pid_.Reset();
+	}
+	#endif
+
+    uint8_t frame[8];
+    // SA 上档或遥控停更时优先失能，禁止进入自动使能分支。
     if (remote_watch_.Timeout() || remote_.robot_ctrl == topic::remote_to::StartMode::Off)
 	{
-        uint8_t frame[8];
+		#if defined(CONFIG_TRD_PITCH_DOWN)
+		{
+			down_pitch_motor_.SetTargetTorque(0.0f);
+			down_pitch_motor_.PackCmdFrame(frame, DmMotor::Cmd::Disable);
+			gimbal::SendCmd(&user_can0_msgq, kDownPitchCanId, frame);
+		}
+		#endif
 
-        DUST_LOG_WRN("pitch disable: stall=%u ctrl=%d ver=%u",
-                     static_cast<unsigned>(remote_watch_.Stall()), static_cast<int>(remote_.robot_ctrl),
-                     static_cast<unsigned>(remote_.version));
-        up_pitch_motor_.PackCmdFrame(frame, DmMotor::Cmd::Disable);
-        gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
+		#if defined(CONFIG_TRD_PITCH_UP)
+		{
+			up_pitch_motor_.SetTargetTorque(0.0f);
+			up_pitch_motor_.PackCmdFrame(frame,   DmMotor::Cmd::Disable);
+			gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
+		}
+		#endif
 
-        return true;
-    }
-
-    if (imu_watch_.Timeout())
-	{
-        uint8_t frame[8];
-
-        up_pitch_motor_.SetTargetTorque(0.0f);
-        up_pitch_motor_.PackCtrlFrame(frame);
-        gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
-
-        return true;
-    }
-
-    if (g_set_zero_up) {
-        g_set_zero_up = false;
-        gimbal::SaveZero(up_pitch_motor_, &user_can0_msgq, kUpPitchCanId);
-        return true;
-    }
-
-    if (!gimbal::Enabled(up_pitch_motor_))
-	{
-        DUST_LOG_WRN("pitch not enabled: err=%d", static_cast<int>(up_pitch_motor_.ReadAll().err));
-        if (gimbal::Enable(up_pitch_motor_, &user_can0_msgq, kUpPitchCanId)) {
-            DUST_LOG_INF("pitch re-enabled");
+		if (remote_.robot_ctrl != topic::remote_to::StartMode::Off) {
+            DUST_LOG_WRN("pitch disable: stall=%u ctrl=%d ver=%u", static_cast<unsigned>(remote_watch_.Stall()), static_cast<int>(remote_.robot_ctrl), static_cast<unsigned>(remote_.version));
         }
+
+        return true;
     }
+
+	#if defined(CONFIG_TRD_PITCH_UP)
+	{
+		// IMU 停更：上 pitch 失去反馈，只发零力矩，下 pitch 不受影响。
+		if (imu_watch_.Timeout()) {
+			up_pitch_motor_.SetTargetTorque(0.0f);
+			up_pitch_motor_.PackCtrlFrame(frame);
+			gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
+		}
+	}
+	#endif
+
+	#if defined(CONFIG_TRD_PITCH_DOWN)
+	{
+		if (g_set_zero_down) {
+			g_set_zero_down = false;
+			gimbal::SaveZero(down_pitch_motor_, &user_can0_msgq, kDownPitchCanId);
+		}
+
+		if (!gimbal::Enabled(down_pitch_motor_))
+		{
+			DUST_LOG_WRN("pitch not enabled: err=%d", static_cast<int>(down_pitch_motor_.ReadAll().err));
+			if (gimbal::Enable(down_pitch_motor_, &user_can0_msgq, kDownPitchCanId)) {
+				DUST_LOG_INF("pitch re-enabled");
+			}
+		}
+	}
+	#endif
+
+	#if defined(CONFIG_TRD_PITCH_UP)
+	{
+		if (g_set_zero_up) {
+			g_set_zero_up = false;
+			gimbal::SaveZero(up_pitch_motor_, &user_can0_msgq, kUpPitchCanId);
+		}
+
+		if (!gimbal::Enabled(up_pitch_motor_))
+		{
+			DUST_LOG_WRN("pitch not enabled: err=%d", static_cast<int>(up_pitch_motor_.ReadAll().err));
+			if (gimbal::Enable(up_pitch_motor_, &user_can0_msgq, kUpPitchCanId)) {
+				DUST_LOG_INF("pitch re-enabled");
+			}
+		}
+	}
+	#endif
 
     return true;
 }
@@ -127,80 +186,158 @@ static TaskResult Task(void* context)
 
     const float dt = dt_meter_.Update();
 
-    // 直接读话题：每拍取最新状态，不积压历史通知；读失败保留上一帧值
     zbus_chan_read(&pub_remote_to, &remote_,  K_NO_WAIT);
-    zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT);
+	zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT);
 
-    // 输入停更或整车关闭：处置交给 OnRetry
     const bool remote_lost = remote_watch_.Update(remote_.version);
-    const bool imu_lost    = imu_watch_.Update(imu_msg_.version);
+	const bool imu_lost    = imu_watch_.Update(imu_msg_.version);
 
-    if (remote_lost || imu_lost || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
-        return TaskResult::Retry;
-    }
-
-    if (g_set_zero_up || !gimbal::Enabled(up_pitch_motor_)) {
-        return TaskResult::Retry;
-    }
-
-    // 窗口滑窗检测掉线：flag_ 与 pre_flag_ 相等即本拍无新反馈，按周期分频检查
-
-    if (motor_watch_.Update(up_pitch_motor_)) {
-        DUST_LOG_ERR("pitch lost");
+    if (remote_lost     || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
         return TaskResult::Retry;
     }
 
     uint8_t frame[8];
 
-    const float up_now_rad	   = imu_msg_.pitch * kDegToRad;	// IMU 发布单位为度，取反统一方向后转 rad
-    // custom1=On 用 var 目标角；Off 用遥控 [-1,1] 线性映射到机械限位
-    const float up_target_deg  = (remote_.custom1 == topic::remote_to::StartMode::On) ? target_deg_ : kUpPitchMinDeg + (kUpPitchMaxDeg - kUpPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f;
-    const float up_target_rad  = up_target_deg  * kDegToRad;
-    const float up_err 	   	   = WrapRad(up_now_rad - up_target_rad);
+	#if defined(CONFIG_TRD_PITCH_UP)
+	{
+		// up pitch
+		if (g_set_zero_up   || !gimbal::Enabled(up_pitch_motor_)) {
+			return TaskResult::Retry;
+		}
 
-    // 目标与反馈（度）
-    const float pid_torque 	   = up_pid_.Calc(0.0f, up_err, dt);
-    const float gravity_torque = GravityTorque(up_now_rad);
-    const float up_torque 	   = std::clamp(pid_torque + gravity_torque, -kPitchTorqueMax, kPitchTorqueMax);
-	
-    up_pitch_motor_.SetTargetTorque(0);
-    up_pitch_motor_.PackCtrlFrame(frame);
-    gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
-    
-	DUST_LOG_DBG("pitch_track", "%f,%f", static_cast<double>(up_target_deg), static_cast<double>(imu_msg_.pitch));
+		if (up_motor_watch_.Update(up_pitch_motor_)) {
+			DUST_LOG_ERR("up pitch lost");
+			return TaskResult::Retry;
+		}
+
+		// 上 pitch：IMU 角闭环 + 重力前馈；IMU 停更时只发零力矩，本拍结束。
+		if (imu_lost)
+		{
+			up_pitch_motor_.SetTargetTorque(0.0f);
+			up_pitch_motor_.PackCtrlFrame(frame);
+			gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
+
+			return TaskResult::Continue;
+		}
+
+		const float up_now_rad	   = imu_msg_.pitch * kDegToRad;	// IMU 发布单位为度，取反统一方向后转 rad
+		// custom1=On 用 var 目标角；Off 用遥控 [-1,1] 线性映射到机械限位
+		const float up_target_deg  = (remote_.custom1 == topic::remote_to::StartMode::On) ? up_target_deg_ : kUpPitchMinDeg + (kUpPitchMaxDeg - kUpPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f;
+		const float up_target_rad  = up_target_deg  * kDegToRad;
+		const float up_err 	   	   = WrapRad(up_now_rad - up_target_rad);
+
+		const float up_pid_torque  = up_pid_.Calc(0.0f, up_err, dt);
+		const float gravity_torque = GravityTorque(up_now_rad);
+		const float up_torque 	   = std::clamp(up_pid_torque + gravity_torque, -kPitchTorqueMax, kPitchTorqueMax);
+
+		up_pitch_motor_.SetTargetTorque(up_torque);
+		up_pitch_motor_.PackCtrlFrame(frame);
+		gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
+
+		DUST_LOG_DBG("pitch_up_track", "%f,%f,%f,%f", static_cast<double>(up_target_deg), static_cast<double>(imu_msg_.pitch), static_cast<double>(up_torque), static_cast<double>(imu_msg_.gyro[1]));
+	}
+	#endif
+
+	#if defined(CONFIG_TRD_PITCH_DOWN)
+	{
+		// down pitch
+		if (g_set_zero_down || !gimbal::Enabled(down_pitch_motor_)) {
+			return TaskResult::Retry;
+		}
+
+		// 窗口滑窗检测掉线：flag_ 与 pre_flag_ 相等即本拍无新反馈，按周期分频检查
+		if (down_motor_watch_.Update(down_pitch_motor_)) {
+			DUST_LOG_ERR("down pitch lost");
+			return TaskResult::Retry;
+		}
+
+		// 下 pitch：电机累计角取反后归一到 [-pi, pi)，与取反的力矩输出统一：逆时针为正。
+		const DmMotor::Snapshot motor = down_pitch_motor_.ReadAll();
+		const float down_now_rad 	  = WrapRad(-motor.radian);
+		const float down_now_deg 	  = down_now_rad * kRadToDeg;
+		// SB 上档用 var 目标；其余档位用遥控 pitch 映射到机械范围。
+		const float down_target_deg   = std::clamp((remote_.custom1 == topic::remote_to::StartMode::On) ? down_target_deg_ : kDownPitchMinDeg + (kDownPitchMaxDeg - kDownPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f, kDownPitchMinDeg, kDownPitchMaxDeg);
+		const float down_target_rad   = down_target_deg * kDegToRad;
+
+		float pid_torque  = 0.0f;
+		float down_torque = 0.0f;
+
+		if (std::isfinite(down_target_rad) && std::isfinite(down_now_rad))
+		{
+			const float down_err = WrapRad(down_now_rad - down_target_rad);
+			pid_torque  = down_pid_.Calc(0.0f, down_err, dt);
+
+			down_torque = std::clamp(pid_torque, -kPitchTorqueMax, kPitchTorqueMax);
+
+			// 逆时针为正；边界及越界时仅允许向范围内施加力矩。
+			const bool push_below_min = down_now_rad <= kDownPitchMinDeg * kDegToRad && down_torque < 0.0f;
+			const bool push_above_max = down_now_rad >= kDownPitchMaxDeg * kDegToRad && down_torque > 0.0f;
+
+			if (push_below_min || push_above_max) {
+				down_torque = 0.0f;
+				down_pid_.Reset();
+			}
+		} 
+		else 
+		{
+			down_pid_.Reset();
+		}
+
+		down_pitch_motor_.SetTargetTorque(-0);
+		down_pitch_motor_.PackCtrlFrame(frame);
+		gimbal::SendCmd(&user_can0_msgq, kDownPitchCanId, frame);
+
+		DUST_LOG_DBG("pitch_down_track", "%f,%f", static_cast<double>(down_target_deg), static_cast<double>(down_now_deg));
+	}
+	#endif
 
     return TaskResult::Continue;
 }
 
 static bool thread_init()
 {
-    DmMotor::Config cfg{};
-    cfg.ctrl_met = ControlMethon::Mit;
-    cfg.gearbox_ratio = 10.0f;  			// J4310-2EC 内置减速箱 10:1
-    cfg.wheel_r = 0.0f;         			// pitch 是旋转关节，无线速度换算
+	alg::pid::Pid::Config pid_cfg {
+		.outMax = kPitchTorqueMax,
+	};
 
-    cfg.kp = 0.0f;
-    cfg.kd = 0.0f;
+    DmMotor::Config cfg {
+		.ctrl_met 	    = ControlMethon::Mit, 
+		.gearbox_ratio 	= 10.f,
+		.wheel_r 		= 0.f,
+		.kp 			= 0.0f,
+		.kd 			= 0.0f,
+		.PMAX 			= 12.5f,
+		.VMAX 			= 30.0f,
+		.TMAX			= 10.f,
+	};
+    
+	#if defined(CONFIG_TRD_PITCH_DOWN)
+	{
+		pid_cfg.kp     = 100.f;
+		pid_cfg.ki     = 0.0f;
+		pid_cfg.kd     = 10.0f;
+		down_pid_.Init(pid_cfg);
 
-    cfg.PMAX = 12.5f;
-    cfg.VMAX = 30.0f;
-    cfg.TMAX = 10.0f;
+		cfg.can_id    = kDownPitchCanId;
+		cfg.master_id = kDownPitchMasterId;
+		down_pitch_motor_.Init(cfg);
+	}
+	#endif
 
-    cfg.can_id    = kUpPitchCanId;
-    cfg.master_id = kUpPitchMasterId;
-    up_pitch_motor_.Init(cfg);
+	#if defined(CONFIG_TRD_PITCH_UP)
+	{
+		pid_cfg.kp     = 1.2f;
+		pid_cfg.ki     = 0.0f;
+		pid_cfg.kd     = 0.08f;
+		up_pid_.Init(pid_cfg);
 
-    // 上 pitch 位置环：输出力矩
-    alg::pid::Pid::Config pid_cfg {};
+		cfg.can_id    = kUpPitchCanId;
+		cfg.master_id = kUpPitchMasterId;
+		up_pitch_motor_.Init(cfg);
+	}
+	#endif
 
-    pid_cfg.kp     = 1.2f;
-    pid_cfg.ki     = 0.0f;
-    pid_cfg.kd     = 0.08f;
-    pid_cfg.outMax = kPitchTorqueMax;
-
-    up_pid_.Init(pid_cfg);
-
-    DUST_LOG_INF("pitch ready: up 0x04/0x14, CAN0");
+    DUST_LOG_INF("pitch ready: CAN0");
 
     return true;
 }
@@ -215,15 +352,25 @@ static bool thread_start()
     return true;
 }
 
-CAN_RX_HANDLER(USER_RX_CAN0, kUpPitchMasterId,   [](uint8_t* data) { up_pitch_motor_  .CanCpltRxCallback(data); });
+#if defined(CONFIG_TRD_PITCH_DOWN)
+CAN_RX_HANDLER(USER_RX_CAN0, kDownPitchMasterId,   [](uint8_t* data) { down_pitch_motor_  .CanCpltRxCallback(data); });
 
-REGISTER_SHELL_VAR("pitch_zero_up",   g_set_zero_up);
-REGISTER_SHELL_VAR("pitch_up_gscale", gravity_scale_);
-REGISTER_SHELL_VAR("pitch_up_target", target_deg_);
+REGISTER_SHELL_VAR("pitch_zero_down",   g_set_zero_down);
+REGISTER_SHELL_VAR("pitch_down_target", down_target_deg_);
+REGISTER_SHELL_VAR("pitch_down_kp",     down_pid_.GetKp());
+REGISTER_SHELL_VAR("pitch_down_ki",     down_pid_.GetKi());
+REGISTER_SHELL_VAR("pitch_down_kd",     down_pid_.GetKd());
+#endif
 
-REGISTER_SHELL_VAR("pitch_up_kp",     up_pid_.GetKp());
-REGISTER_SHELL_VAR("pitch_up_ki",     up_pid_.GetKi());
-REGISTER_SHELL_VAR("pitch_up_kd",     up_pid_.GetKd());
+#if defined(CONFIG_TRD_PITCH_UP)
+CAN_RX_HANDLER(USER_RX_CAN0, kUpPitchMasterId,     [](uint8_t* data) { up_pitch_motor_    .CanCpltRxCallback(data); });
+
+REGISTER_SHELL_VAR("pitch_zero_up",     g_set_zero_up);
+REGISTER_SHELL_VAR("pitch_up_target",   up_target_deg_);
+REGISTER_SHELL_VAR("pitch_up_kp",       up_pid_.GetKp());
+REGISTER_SHELL_VAR("pitch_up_ki",       up_pid_.GetKi());
+REGISTER_SHELL_VAR("pitch_up_kd",       up_pid_.GetKd());
+#endif
 
 REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, nullptr, "pitch_init");
 REGISTER_THREAD(thread_start, MidThread, ContinueOnFail, "pitch_start");

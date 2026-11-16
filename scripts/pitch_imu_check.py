@@ -1,6 +1,6 @@
-"""上 pitch 电机角度与 IMU pitch 对比采集。
+"""下 pitch 电机角度与 IMU pitch 对比采集。
 
-PC 逐点设置 pitch_up_target，记录电机反馈角与 IMU 解算 pitch，输出偏差表。
+PC 逐点设置 pitch_down_target，记录电机反馈角与 IMU 解算 pitch，输出偏差表。
 
 python scripts/pitch_imu_check.py --port COM8 --low 5 --high -60 --points 14
 python scripts/pitch_imu_check.py --file pitch_imu_check.csv
@@ -55,7 +55,7 @@ def capture(args) -> None:
         try:
             for index, point in enumerate(points):
                 target = round(point, 2)
-                send(f"var set pitch_up_target {target}")
+                send(f"var set pitch_down_target {target}")
                 print(f"[{index + 1}/{len(points)}] 目标 {target:+.1f}°", flush=True)
 
                 settle_until = time.monotonic() + args.settle_ms / 1000.0
@@ -116,7 +116,7 @@ def analyze(path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="上 pitch 电机角与 IMU pitch 对比")
+    parser = argparse.ArgumentParser(description="下 pitch 电机角与 IMU pitch 对比")
     parser.add_argument("--port", default="COM8")
     parser.add_argument("--baud", type=int, default=BAUD)
     parser.add_argument("--low", type=float, default=5.0, help="起始目标角（度）")

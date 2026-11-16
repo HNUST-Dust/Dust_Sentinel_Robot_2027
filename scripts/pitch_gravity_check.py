@@ -1,4 +1,4 @@
-"""上 pitch 重力补偿 A/B 验证：固定角度，依次 0/50/100/0%，输出对照表。
+"""下 pitch 重力补偿 A/B 验证：固定角度，依次 0/50/100/0%，输出对照表。
 
 python scripts/pitch_gravity_check.py --port COM8 --angles -40 -30 -25
 python scripts/pitch_gravity_check.py --file pitch_gravity_check.csv
@@ -108,7 +108,7 @@ def capture(args):
             link.send("log off")
             link.wait_acks()
             link.set("ptest_on", 0)
-            original_scale = link.get_float("pitch_up_gscale")
+            original_scale = link.get_float("pitch_down_gscale")
             # 初始角取最近的 IMU 角，由 MCU 从当前姿态平滑进入第一测点。
             link.set("ptest_mode", 2)
             link.set("ptest_speed", args.speed)
@@ -121,7 +121,7 @@ def capture(args):
                 link.set("ptest_hold", angle)
                 # 回到 0% 再开始该角度的对照；末尾再测 0% 检查漂移/滞回。
                 for stage, scale in enumerate([0.0, 0.5, 1.0, 0.0]):
-                    link.set("pitch_up_gscale", scale)
+                    link.set("pitch_down_gscale", scale)
                     print(f"[stage] angle={angle:g}deg scale={scale:g}，等待目标到位及稳定时间", flush=True)
                     start = beat = last_data = time.monotonic()
                     ready_at = collect_at = None
@@ -170,7 +170,7 @@ def capture(args):
                 link.set("ptest_on", 0)
             finally:
                 if original_scale is not None:
-                    link.set("pitch_up_gscale", original_scale)
+                    link.set("pitch_down_gscale", original_scale)
             print(f"[i] 已保存 {len(rows)} 点: {args.save}", flush=True)
     return rows
 

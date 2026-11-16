@@ -51,7 +51,7 @@ config TRD_CAN_TX
 
 config TRD_CHASSIS
     bool "Chassis thread"
-    default y
+    default n
     select DUST_MOD_DEV_MOTOR_DJI
     select DUST_CTL_PID
     select DUST_FLT_LPF
@@ -76,16 +76,27 @@ config TRD_YAW
     help
       Initialize big yaw on CAN1 and small yaw on CAN0, without enabling motors.
 
-config TRD_PITCH
-    bool "Down pitch motor initialization"
-    default y
+config TRD_PITCH_UP
+    bool "Up pitch motor"
+    default n
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
     select DUST_MON_DTMETER
     select DUST_MON_STALLWATCH
     help
-      Initialize up and down pitch on CAN0.
+      Enable up pitch (0x04/0x14) on CAN0, IMU angle loop with gravity feedforward.
+
+config TRD_PITCH_DOWN
+    bool "Down pitch motor"
+    default n
+    select TRD_CAN_TX
+    select DUST_MOD_DEV_MOTOR_DM
+    select DUST_MATH_ANGLE
+    select DUST_MON_DTMETER
+    select DUST_MON_STALLWATCH
+    help
+      Enable down pitch (0x02/0x12) on CAN0, motor angle loop with mechanical limits.
 
 config TRD_IMU
     bool "IMU thread"
@@ -125,7 +136,7 @@ config TRD_REMOTE
 
 config TRD_TEST
     bool "IMU attitude diagnosis"
-    default y
+    default n
     select TRD_IMU
     help
       Enable IMU raw and attitude debug output for drift diagnosis.

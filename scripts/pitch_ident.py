@@ -1,4 +1,4 @@
-"""上 pitch 静态辨识：PC 通过 var 下发目标角，log 采集角度与力矩，反推重力矩与摩擦。
+"""下 pitch 静态辨识：PC 通过 var 下发目标角，log 采集角度与力矩，反推重力矩与摩擦。
 
 python scripts/pitch_ident.py --port COM8 --low -50 --high -10 --points 9 --cycles 2
 python scripts/pitch_ident.py --file pitch_ident_capture.csv
@@ -52,9 +52,9 @@ def capture(args):
 
         ser.reset_input_buffer()
         configure("log off")
-        configure(f"var set pitch_up_kp {args.kp}")
-        configure(f"var set pitch_up_ki {args.ki}")
-        configure(f"var set pitch_up_kd {args.kd}")
+        configure(f"var set pitch_down_kp {args.kp}")
+        configure(f"var set pitch_down_ki {args.ki}")
+        configure(f"var set pitch_down_kd {args.kd}")
         configure("log mode pitch_track on")
         configure("log on pitch_track 1")
 
@@ -66,7 +66,7 @@ def capture(args):
             for cycle in range(args.cycles):
                 for point in points:
                     target = round(point, 2)
-                    send(f"var set pitch_up_target {target}")
+                    send(f"var set pitch_down_target {target}")
                     settle_until = time.monotonic() + args.settle_ms / 1000.0
                     while time.monotonic() < settle_until:
                         line, data = receive()
@@ -158,7 +158,7 @@ def analyze(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="上 pitch 静态辨识采集")
+    parser = argparse.ArgumentParser(description="下 pitch 静态辨识采集")
     parser.add_argument("--port", default="COM8")
     parser.add_argument("--baud", type=int, default=BAUD)
     parser.add_argument("--low", type=float, default=-50.0, help="最低目标角（度）")

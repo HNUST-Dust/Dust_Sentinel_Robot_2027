@@ -170,7 +170,7 @@ static TaskResult Task(void* context)
     // 大 yaw 物理方向相反，输出取反
     uint8_t frame[8];
 
-    big_yaw_motor_.SetTargetTorque(-0);
+    big_yaw_motor_.SetTargetTorque(-big_torque);
     big_yaw_motor_.PackCtrlFrame(frame);
     gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
 

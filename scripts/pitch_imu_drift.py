@@ -1,4 +1,4 @@
-"""上 pitch 往复扫描，检查 IMU pitch 在云台运动后是否漂移。
+"""下 pitch 往复扫描，检查 IMU pitch 在云台运动后是否漂移。
 
 思路：同一目标角多次经过时，IMU pitch 应当一致。各轮之间的差异即漂移量。
 电机角度与 IMU 的绝对偏差不作为判据。
@@ -59,7 +59,7 @@ def capture(args) -> None:
                 print(f"[轮 {cycle + 1}/{args.cycles}] {'上行' if cycle % 2 == 0 else '下行'}", flush=True)
 
                 for point in order:
-                    send(f"var set pitch_up_target {round(point, 2)}")
+                    send(f"var set pitch_down_target {round(point, 2)}")
                     settle_until = time.monotonic() + args.settle_ms / 1000.0
                     while time.monotonic() < settle_until:
                         line = clean(ser.readline())
@@ -140,7 +140,7 @@ def analyze(path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="上 pitch 往复扫描 IMU 漂移检查")
+    parser = argparse.ArgumentParser(description="下 pitch 往复扫描 IMU 漂移检查")
     parser.add_argument("--port", default="COM8")
     parser.add_argument("--baud", type=int, default=BAUD)
     parser.add_argument("--low", type=float, default=5.0, help="一端目标角（度）")

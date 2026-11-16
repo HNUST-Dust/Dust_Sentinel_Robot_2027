@@ -1,10 +1,10 @@
-# 上 pitch 重力前馈 A/B 验证
+# 下 pitch 重力前馈 A/B 验证
 
 本测试新增 `ptest_mode=2` 固定目标模式，需先烧录本次固件一次。后续角度和等待时间通过脚本/var 改，无需烧录。
 模式 2 沿用原 pitch PID、CAN 和 IMU，正常叠加重力前馈；不使用起动力矩扫描的偏置。
 其他测试模式仍屏蔽重力前馈，避免重复补偿。
 
-遥控开启，双 pitch 正常使能，下 pitch 能保持原位置后，关闭串口助手，运行：
+遥控开启，下 pitch 正常使能，下 pitch 能保持原位置后，关闭串口助手，运行：
 
 ```powershell
 python scripts/pitch_gravity_check.py --port COM8 --angles -40 -30 -25
@@ -39,7 +39,7 @@ python scripts/pitch_gravity_check.py --file pitch_gravity_check.csv
 ```text
 var set ptest_mode 2
 var set ptest_hold -30
-var set pitch_up_gscale 0.5
+var set pitch_down_gscale 0.5
 ```
 
 测试启停和心跳仍使用 `ptest_on` / `ptest_feed`。推荐用脚本自动处理。

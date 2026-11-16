@@ -29,7 +29,7 @@ if(CONFIG_TRD_CHASSIS)
 endif()
 
 # 云台公共命令：pitch / yaw 任一启用就需要
-if(CONFIG_TRD_YAW OR CONFIG_TRD_PITCH)
+if(CONFIG_TRD_YAW OR CONFIG_TRD_PITCH_UP OR CONFIG_TRD_PITCH_DOWN)
 	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gimbal/gimbal.cpp)
 	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gimbal)
 endif()
@@ -42,7 +42,7 @@ if(CONFIG_TRD_YAW)
 	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gimbal/yaw)
 endif()
 
-if(CONFIG_TRD_PITCH)
+if(CONFIG_TRD_PITCH_UP OR CONFIG_TRD_PITCH_DOWN)
 	target_sources(app PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/gimbal/pitch/trd_pitch.cpp
 	)

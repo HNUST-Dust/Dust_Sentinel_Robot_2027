@@ -25,15 +25,15 @@ class FakeSerial:
 
 class GetFloatTests(unittest.TestCase):
     def test_plain_and_named_responses(self):
-        for response in (b"0.500000\r\n", b"pitch_up_gscale = 0.500000\r\n",
-                         b"pitch_up_gscale=5e-1\r\n",
-                         b"\x1b[32mpitch_up_gscale = .5\x1b[0m\r\n"):
+        for response in (b"0.500000\r\n", b"pitch_down_gscale = 0.500000\r\n",
+                         b"pitch_down_gscale=5e-1\r\n",
+                         b"\x1b[32mpitch_down_gscale = .5\x1b[0m\r\n"):
             with self.subTest(response=response):
-                self.assertEqual(MODULE.Link(FakeSerial(response)).get_float("pitch_up_gscale"), 0.5)
+                self.assertEqual(MODULE.Link(FakeSerial(response)).get_float("pitch_down_gscale"), 0.5)
 
     def test_unrelated_variable_is_ignored(self):
-        response = b"pitch_up_kp = 6.000000\r\npitch_up_gscale = 0.500000\r\n"
-        self.assertEqual(MODULE.Link(FakeSerial(response)).get_float("pitch_up_gscale"), 0.5)
+        response = b"pitch_down_kp = 6.000000\r\npitch_down_gscale = 0.500000\r\n"
+        self.assertEqual(MODULE.Link(FakeSerial(response)).get_float("pitch_down_gscale"), 0.5)
 
     def test_heartbeat_ack_is_not_confused_with_other_command(self):
         class AckSerial(FakeSerial):
@@ -42,7 +42,7 @@ class GetFloatTests(unittest.TestCase):
         link = MODULE.Link(AckSerial(b""))
         link.active = True
         link.last_feed -= 1
-        link.set("pitch_up_gscale", 0.5)
+        link.set("pitch_down_gscale", 0.5)
         self.assertEqual(link.pending, 0)
         self.assertEqual(link.feed, 2)
         self.assertEqual(link.feed_ack, 2)
