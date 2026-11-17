@@ -174,6 +174,8 @@ static TaskResult Task(void* context)
     big_yaw_motor_.PackCtrlFrame(frame);
     gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
 
+    DUST_LOG_DBG("yaw_pid", "%f,%f,%f,%f,%f,%f", static_cast<double>(big_target * kRadToDeg), static_cast<double>(big_joint * kRadToDeg), static_cast<double>(big_err * kRadToDeg), static_cast<double>(big_torque), static_cast<double>(big_pid_.GetIntegralError()), static_cast<double>(dt * 1000000.0f));
+
     return TaskResult::Continue;
 }
 

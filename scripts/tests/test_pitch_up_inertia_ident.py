@@ -71,12 +71,14 @@ class FakeSerial:
         self.clock.now += DT
         if self.queue:
             return (self.queue.pop(0) + "\r\n").encode()
-        if not self.on or self.faults.get("no_data"):
+        # RAW 直发不依赖 log on，固件一直在打
+        if self.faults.get("no_data"):
             return b""
 
         tgt_rad = math.radians(self.target)
         err = tgt_rad - math.radians(self.angle)
-        pid = 1.2 * err + 0.08 * self.vel
+        # kd=0：辨识时不要阻尼项，否则 J 会被 kd 吸收
+        pid = 1.2 * err
         gravity = M.gravity_torque(math.radians(self.angle))
         torque = pid + gravity
         acc = (torque - TAU_F * (1.0 if self.vel >= 0 else -1.0)) / J_TRUE
@@ -88,7 +90,10 @@ class FakeSerial:
         if self.faults.get("saturation"):
             torque = 7.0
 
-        line = (f"{self.target:.3f},{self.angle:.3f},{torque:.3f},{self.vel:.3f}")
+        # 固件 RAW 格式：UIDENT,tgt_mdeg,ang_mdeg,tor_mnm,gy_mrad_s
+        # 固件实测 gyro[1] 与 pitch 变化方向相反，桩里同样取反以匹配真实链路
+        line = (f"UIDENT,{int(self.target*1000)},{int(self.angle*1000)},"
+                f"{int(torque*1000)},{int(-self.vel*1000)}")
         return (line + "\r\n").encode()
 
 
@@ -113,8 +118,9 @@ class IdentTests(unittest.TestCase):
             self.assertTrue(rows)
             self.assertEqual(list(rows[0]), M.FIELDS)
             self.assertEqual(ser.commands[-1], "log off")
-            self.assertLess(ser.commands.index("log on pitch_up_track 1"),
-                            ser.commands.index("log mode pitch_up_track on"))
+            # RAW 直发不走 log 过滤，不应再发 log on / log mode
+            self.assertFalse(any(c.startswith("log on") for c in ser.commands))
+            self.assertFalse(any(c.startswith("log mode") for c in ser.commands))
 
     def test_targets_stay_inside_requested_range(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):

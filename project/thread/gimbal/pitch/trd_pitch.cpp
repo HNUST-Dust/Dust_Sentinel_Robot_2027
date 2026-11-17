@@ -2,8 +2,8 @@
  * @file trd_pitch.cpp
  * @author qingyu
  * @brief 双 pitch 达妙电机协同控制
- * @version 0.4
- * @date 2026-11-16
+ * @version 0.5
+ * @date 2026-11-17
  *
  * @copyright Copyright (c) 2026
  *
@@ -36,31 +36,97 @@ using namespace alg::math;
 
 static Thread<2048> thread_{};
 
-static alg::monitor::DtMeter dt_meter_ {};											// 控制周期测量
+static alg::monitor::DtMeter     dt_meter_ {};										// 控制周期测量
 
-static topic::remote_to::Message remote_  {};										// 遥控最新状态，读失败保留旧值
-static topic::imu_to::Message    imu_msg_ {};										// IMU 最新状态，读失败保留旧值
+static topic::remote_to::Message remote_   {};										// 遥控最新状态，读失败保留旧值
+static topic::imu_to::Message    imu_msg_  {};										// IMU 最新状态，读失败保留旧值
+
+static alg::monitor::StallWatch  remote_watch_ {};									// 遥控停发检测（默认 100 拍）
+static alg::monitor::StallWatch  imu_watch_    {};									// IMU 停发检测（默认 100 拍）
 
 static constexpr uint32_t kLostCheckPeriod = 100;
 
-static alg::monitor::StallWatch remote_watch_ {};									// 遥控停发检测（默认 100 拍）
-static alg::monitor::StallWatch imu_watch_    {};									// IMU 停发检测（默认 100 拍）
-
 #if defined(CONFIG_TRD_PITCH_UP)
 
+static float up_target_deg_  = 0.0f;												// 上 pitch 目标角（度），通过 var 设定
+static bool  g_set_zero_up_  = false;												// 上 pitch 设零请求，执行后自清
+
 static alg::pid::Pid up_pid_     {};												// 上 pitch 位置环
-static gimbal::LostWatch 		up_motor_watch_   { kLostCheckPeriod };		// 上 pitch 电机掉线检测
-static float up_target_deg_   = 0.0f;												// 上 pitch 目标角（度），通过 var 设定
-static bool  g_set_zero_up   = false;												// 上 pitch 设零请求，执行后自清
+static gimbal::LostWatch up_motor_watch_   { kLostCheckPeriod };				// 上 pitch 电机掉线检测
 
 #endif
 
 #if defined(CONFIG_TRD_PITCH_DOWN)
 
+static float down_target_deg_ = 45.0f;												// 下 pitch 目标角（度），通过 var 设定
+static bool  g_set_zero_down_ = false;												// 下 pitch 设零请求，执行后自清
+
 static alg::pid::Pid down_pid_   {};												// 下 pitch 位置环
-static gimbal::LostWatch 		down_motor_watch_ { kLostCheckPeriod };		// 下 pitch 电机掉线检测
-static float down_target_deg_ = 10.0f;												// 下 pitch 目标角（度），通过 var 设定
-static bool  g_set_zero_down = false;												// 下 pitch 设零请求，执行后自清
+static gimbal::LostWatch down_motor_watch_ { kLostCheckPeriod };			   // 下 pitch 电机掉线检测
+
+/**
+ * @brief 下 pitch 五次多项式目标角曲线状态
+ */
+struct {
+	float position = 0.0f;
+	float velocity = 0.0f;
+	float acceleration = 0.0f;
+	float target = 0.0f;
+	float elapsed = 2.0f;
+	float coefficient[6] {};
+	bool initialized = false;
+} down_target_curve_;
+
+/**
+ * @brief 以 2 秒五次多项式平滑下 pitch 目标角，重规划时保持参考角及其一、二阶导数连续
+ * @param target 目标角，单位 rad
+ * @param now 当前电机角，单位 rad，首次运行时作为曲线起点
+ * @param dt 本拍时间，单位 s
+ * @return 平滑后的参考角，单位 rad
+ */
+static float SmoothDownTarget(float target, float now, float dt)
+{
+	constexpr float duration = 2.0f;
+	auto& curve = down_target_curve_;
+	auto& c = curve.coefficient;
+	if (!curve.initialized)
+	{
+		curve.position = now;
+		curve.target = now;
+		c[0] = now;
+		curve.initialized = true;
+	}
+
+	if (target != curve.target)
+	{
+		const float delta       = target - curve.position;
+		const float velocity     = curve.velocity * duration;
+		const float acceleration = curve.acceleration * duration * duration;
+		c[0] = curve.position;
+		c[1] = velocity;
+		c[2] =  0.5f  * acceleration;
+		c[3] =  10.0f * delta - 6.0f * velocity - 1.5f * acceleration;
+		c[4] = -15.0f * delta + 8.0f * velocity + 1.5f * acceleration;
+		c[5] =  6.0f  * delta - 3.0f * velocity - 0.5f * acceleration;
+		curve.target = target;
+		curve.elapsed = 0.0f;
+	}
+
+	curve.elapsed = std::min(curve.elapsed + dt, duration);
+	if (curve.elapsed >= duration)
+	{
+		curve.position = curve.target;
+		curve.velocity = 0.0f;
+		curve.acceleration = 0.0f;
+		return curve.position;
+	}
+
+	const float u      = curve.elapsed / duration;
+	curve.position     = c[0]  + u * (c[1] + u * (c[2] + u * (c[3] + u * (c[4] + u * c[5]))));
+	curve.velocity     = (c[1] + u * (2.0f * c[2] + u * (3.0f * c[3] + u * (4.0f * c[4] + u * 5.0f * c[5])))) / duration;
+	curve.acceleration = (2.0f * c[2] + u * (6.0f * c[3] + u * (12.0f * c[4] + u * 20.0f * c[5]))) / (duration * duration);
+	return curve.position;
+}
 
 #endif
 
@@ -97,6 +163,7 @@ static bool OnRetry(void* context)
 	#if defined(CONFIG_TRD_PITCH_DOWN)
 	{
 		down_pid_.Reset();
+		down_target_curve_ = {};
 	}
 	#endif
 
@@ -140,8 +207,8 @@ static bool OnRetry(void* context)
 
 	#if defined(CONFIG_TRD_PITCH_DOWN)
 	{
-		if (g_set_zero_down) {
-			g_set_zero_down = false;
+		if (g_set_zero_down_) {
+			g_set_zero_down_ = false;
 			gimbal::SaveZero(down_pitch_motor_, &user_can0_msgq, kDownPitchCanId);
 		}
 
@@ -157,8 +224,8 @@ static bool OnRetry(void* context)
 
 	#if defined(CONFIG_TRD_PITCH_UP)
 	{
-		if (g_set_zero_up) {
-			g_set_zero_up = false;
+		if (g_set_zero_up_) {
+			g_set_zero_up_ = false;
 			gimbal::SaveZero(up_pitch_motor_, &user_can0_msgq, kUpPitchCanId);
 		}
 
@@ -192,7 +259,7 @@ static TaskResult Task(void* context)
     const bool remote_lost = remote_watch_.Update(remote_.version);
 	const bool imu_lost    = imu_watch_.Update(imu_msg_.version);
 
-    if (remote_lost     || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
+    if (remote_lost || remote_.robot_ctrl == topic::remote_to::StartMode::Off) {
         return TaskResult::Retry;
     }
 
@@ -201,7 +268,7 @@ static TaskResult Task(void* context)
 	#if defined(CONFIG_TRD_PITCH_UP)
 	{
 		// up pitch
-		if (g_set_zero_up   || !gimbal::Enabled(up_pitch_motor_)) {
+		if (g_set_zero_up_   || !gimbal::Enabled(up_pitch_motor_)) {
 			return TaskResult::Retry;
 		}
 
@@ -220,7 +287,7 @@ static TaskResult Task(void* context)
 			return TaskResult::Continue;
 		}
 
-		const float up_now_rad	   = imu_msg_.pitch * kDegToRad;	// IMU 发布单位为度，取反统一方向后转 rad
+		const float up_now_rad	   = imu_msg_.pitch * kDegToRad;					// IMU 发布单位为度，取反统一方向后转 rad
 		// custom1=On 用 var 目标角；Off 用遥控 [-1,1] 线性映射到机械限位
 		const float up_target_deg  = (remote_.custom1 == topic::remote_to::StartMode::On) ? up_target_deg_ : kUpPitchMinDeg + (kUpPitchMaxDeg - kUpPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f;
 		const float up_target_rad  = up_target_deg  * kDegToRad;
@@ -234,14 +301,14 @@ static TaskResult Task(void* context)
 		up_pitch_motor_.PackCtrlFrame(frame);
 		gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
 
-		DUST_LOG_DBG("pitch_up_track", "%f,%f,%f,%f", static_cast<double>(up_target_deg), static_cast<double>(imu_msg_.pitch), static_cast<double>(up_torque), static_cast<double>(imu_msg_.gyro[1]));
+		DUST_LOG_DBG("pitch_up_track", "%d,%d", static_cast<int>(up_target_deg * 1000.0f), static_cast<int>(imu_msg_.pitch * 1000.0f));
 	}
 	#endif
 
 	#if defined(CONFIG_TRD_PITCH_DOWN)
 	{
 		// down pitch
-		if (g_set_zero_down || !gimbal::Enabled(down_pitch_motor_)) {
+		if (g_set_zero_down_ || !gimbal::Enabled(down_pitch_motor_)) {
 			return TaskResult::Retry;
 		}
 
@@ -256,15 +323,15 @@ static TaskResult Task(void* context)
 		const float down_now_rad 	  = WrapRad(-motor.radian);
 		const float down_now_deg 	  = down_now_rad * kRadToDeg;
 		// SB 上档用 var 目标；其余档位用遥控 pitch 映射到机械范围。
-		const float down_target_deg   = std::clamp((remote_.custom1 == topic::remote_to::StartMode::On) ? down_target_deg_ : kDownPitchMinDeg + (kDownPitchMaxDeg - kDownPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f, kDownPitchMinDeg, kDownPitchMaxDeg);
-		const float down_target_rad   = down_target_deg * kDegToRad;
+		const float down_target_rad   = down_target_deg_ * kDegToRad;
 
 		float pid_torque  = 0.0f;
 		float down_torque = 0.0f;
 
 		if (std::isfinite(down_target_rad) && std::isfinite(down_now_rad))
 		{
-			const float down_err = WrapRad(down_now_rad - down_target_rad);
+			const float down_reference_rad = SmoothDownTarget(down_target_rad, down_now_rad, dt);
+			const float down_err		   = WrapRad(down_now_rad - down_reference_rad);
 			pid_torque  = down_pid_.Calc(0.0f, down_err, dt);
 
 			down_torque = std::clamp(pid_torque, -kPitchTorqueMax, kPitchTorqueMax);
@@ -281,13 +348,14 @@ static TaskResult Task(void* context)
 		else 
 		{
 			down_pid_.Reset();
+			down_target_curve_ = {};
 		}
 
-		down_pitch_motor_.SetTargetTorque(-0);
+		down_pitch_motor_.SetTargetTorque(-down_torque);
 		down_pitch_motor_.PackCtrlFrame(frame);
 		gimbal::SendCmd(&user_can0_msgq, kDownPitchCanId, frame);
 
-		DUST_LOG_DBG("pitch_down_track", "%f,%f", static_cast<double>(down_target_deg), static_cast<double>(down_now_deg));
+		DUST_LOG_DBG("pitch_down_track", "%f,%f,%f", static_cast<double>(down_target_deg_), static_cast<double>(down_now_deg), static_cast<double>(down_torque));
 	}
 	#endif
 
@@ -310,6 +378,19 @@ static bool thread_init()
 		.VMAX 			= 30.0f,
 		.TMAX			= 10.f,
 	};
+
+	#if defined(CONFIG_TRD_PITCH_UP)
+	{
+		pid_cfg.kp      = 1.2f;
+		pid_cfg.ki      = 0.0f;
+		pid_cfg.kd      = 0.075f;
+		up_pid_.Init(pid_cfg);
+
+		cfg.can_id    = kUpPitchCanId;
+		cfg.master_id = kUpPitchMasterId;
+		up_pitch_motor_.Init(cfg);
+	}
+	#endif
     
 	#if defined(CONFIG_TRD_PITCH_DOWN)
 	{
@@ -321,19 +402,6 @@ static bool thread_init()
 		cfg.can_id    = kDownPitchCanId;
 		cfg.master_id = kDownPitchMasterId;
 		down_pitch_motor_.Init(cfg);
-	}
-	#endif
-
-	#if defined(CONFIG_TRD_PITCH_UP)
-	{
-		pid_cfg.kp     = 1.2f;
-		pid_cfg.ki     = 0.0f;
-		pid_cfg.kd     = 0.08f;
-		up_pid_.Init(pid_cfg);
-
-		cfg.can_id    = kUpPitchCanId;
-		cfg.master_id = kUpPitchMasterId;
-		up_pitch_motor_.Init(cfg);
 	}
 	#endif
 
@@ -352,27 +420,33 @@ static bool thread_start()
     return true;
 }
 
+REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, nullptr, "pitch_init");
+REGISTER_THREAD(thread_start, MidThread, ContinueOnFail, "pitch_start");
+
 #if defined(CONFIG_TRD_PITCH_DOWN)
+
 CAN_RX_HANDLER(USER_RX_CAN0, kDownPitchMasterId,   [](uint8_t* data) { down_pitch_motor_  .CanCpltRxCallback(data); });
 
-REGISTER_SHELL_VAR("pitch_zero_down",   g_set_zero_down);
-REGISTER_SHELL_VAR("pitch_down_target", down_target_deg_);
 REGISTER_SHELL_VAR("pitch_down_kp",     down_pid_.GetKp());
 REGISTER_SHELL_VAR("pitch_down_ki",     down_pid_.GetKi());
 REGISTER_SHELL_VAR("pitch_down_kd",     down_pid_.GetKd());
+
+REGISTER_SHELL_VAR("pitch_down_target", down_target_deg_);
+REGISTER_SHELL_VAR("pitch_zero_down",   g_set_zero_down_);
+
 #endif
 
 #if defined(CONFIG_TRD_PITCH_UP)
+
 CAN_RX_HANDLER(USER_RX_CAN0, kUpPitchMasterId,     [](uint8_t* data) { up_pitch_motor_    .CanCpltRxCallback(data); });
 
-REGISTER_SHELL_VAR("pitch_zero_up",     g_set_zero_up);
-REGISTER_SHELL_VAR("pitch_up_target",   up_target_deg_);
 REGISTER_SHELL_VAR("pitch_up_kp",       up_pid_.GetKp());
 REGISTER_SHELL_VAR("pitch_up_ki",       up_pid_.GetKi());
 REGISTER_SHELL_VAR("pitch_up_kd",       up_pid_.GetKd());
-#endif
 
-REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, nullptr, "pitch_init");
-REGISTER_THREAD(thread_start, MidThread, ContinueOnFail, "pitch_start");
+REGISTER_SHELL_VAR("pitch_up_target",   up_target_deg_);
+REGISTER_SHELL_VAR("pitch_zero_up",     g_set_zero_up_);
+
+#endif
 
 } // namespace thread::pitch

@@ -67,7 +67,7 @@ config TRD_CHASSIS
 
 config TRD_YAW
     bool "Yaw motor initialization"
-    default y
+    default n
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -78,7 +78,7 @@ config TRD_YAW
 
 config TRD_PITCH_UP
     bool "Up pitch motor"
-    default n
+    default y
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -89,7 +89,7 @@ config TRD_PITCH_UP
 
 config TRD_PITCH_DOWN
     bool "Down pitch motor"
-    default n
+    default y
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE

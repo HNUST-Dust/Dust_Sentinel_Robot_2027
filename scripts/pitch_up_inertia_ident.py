@@ -41,7 +41,8 @@ import time
 FIELDS = ["t_ms", "seg", "target_mdeg", "angle_mdeg", "torque_mnm", "gyro_mrad_s"]
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-DATA = re.compile(r"(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+)\s*$")
+# 固件 DUST_LOG_RAW("UIDENT,%d,%d,%d,%d", tgt_mdeg, ang_mdeg, tor_mnm, gy_mrad_s)
+DATA = re.compile(r"UIDENT,(-?\d+),(-?\d+),(-?\d+),(-?\d+)\s*$")
 
 BAUD = 921600
 
@@ -160,7 +161,9 @@ def capture(args, serial_factory=None, clock=time.monotonic) -> None:
             line = clean(ser.readline())
             match = DATA.search(line)
             if match:
-                return line, [float(x) for x in match.groups()]
+                # 固件 RAW 输出毫单位整数，这里换算成物理量（度 / N*m / rad/s）
+                tgt, ang, tor, gy = (int(x) for x in match.groups())
+                return line, [tgt / 1000.0, ang / 1000.0, tor / 1000.0, gy / 1000.0]
             return line, None
 
         def configure(command: str) -> None:
@@ -180,10 +183,9 @@ def capture(args, serial_factory=None, clock=time.monotonic) -> None:
         time.sleep(0.3)
         ser.reset_input_buffer()
 
+        # UIDENT 走 DUST_LOG_RAW 直发，不进队列、不受 log 过滤，
+        # 不需要 log on / log mode；只关掉其他残留条目避免混流。
         configure("log off")
-        # 先 log on 创建条目，再切 log mode；顺序反了会报 not found
-        configure("log on pitch_up_track 1")
-        configure("log mode pitch_up_track on")
 
         # 起点：范围中点；每次阶跃在 中点±amplitude 之间往复
         center = (args.low + args.high) * 0.5
@@ -213,8 +215,8 @@ def capture(args, serial_factory=None, clock=time.monotonic) -> None:
 
                 t_ms = int((clock() - start) * 1000)
                 writer.writerow([t_ms, seg_id,
-                                 int(data[0] * 1000), int(data[1] * 1000),
-                                 int(data[2] * 1000), int(data[3] * 1000)])
+                                 round(data[0] * 1000), round(data[1] * 1000),
+                                 round(data[2] * 1000), round(data[3] * 1000)])
                 count += 1
 
                 now = clock()
@@ -248,8 +250,8 @@ def capture(args, serial_factory=None, clock=time.monotonic) -> None:
             raise RuntimeError("没收到 pitch_up_track 数据")
 
 
-def analyze(path: str, min_speed: float = 0.3, min_acc: float = 2.0,
-            smooth: int = 5) -> None:
+def analyze(path: str, min_speed: float = 0.5, min_acc: float = 1.0,
+            smooth: int = 9) -> None:
     import numpy as np
 
     rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
@@ -257,32 +259,21 @@ def analyze(path: str, min_speed: float = 0.3, min_acc: float = 2.0,
         raise ValueError("CSV 为空")
 
     seg = np.array([int(r["seg"]) for r in rows])
+    t = np.array([float(r["t_ms"]) / 1000.0 for r in rows])
     angle = np.array([float(r["angle_mdeg"]) / 1000.0 for r in rows])
     torque = np.array([float(r["torque_mnm"]) / 1000.0 for r in rows])
     gyro = np.array([float(r["gyro_mrad_s"]) / 1000.0 for r in rows])
 
     print(f"[i] 样本 {len(rows)}，有效段 {len(set(seg) - {-1})}")
 
-    # 采样周期：t_ms 是整数毫秒，1kHz 下相邻差为 0，不能用它算加速度。
-    # 改为用总时长 / 样本数估平均周期（DBG 是固定节拍）。
-    total_ms = float(rows[-1]["t_ms"]) - float(rows[0]["t_ms"])
-    if total_ms <= 0:
-        raise ValueError("CSV 时间戳无跨度，无法估采样周期")
-    dt = total_ms / 1000.0 / max(len(rows) - 1, 1)
-    print(f"[i] 平均采样周期 {dt * 1000.0:.3f} ms（{1.0 / dt:.0f} Hz）")
-
-    # 角加速度：先滑动平均压噪声，再做中心差分
-    def moving_average(x, n):
-        if n <= 1 or len(x) < n:
-            return x.copy()
-        kernel = np.ones(n) / n
-        padded = np.concatenate([np.full(n // 2, x[0]), x, np.full(n // 2, x[-1])])
-        return np.convolve(padded, kernel, mode="valid")[:len(x)]
-
-    gyro_s = moving_average(gyro, smooth)
-    alpha = np.zeros_like(gyro_s)
-    if len(gyro_s) >= 3:
-        alpha[1:-1] = (gyro_s[2:] - gyro_s[:-2]) / (2.0 * dt)
+    # DBG 走异步队列，采样不等间隔且 t_ms 是整毫秒，直接差分角速度会把噪声放大 1/dt 倍
+    # （实测 alpha 达 ±96 rad/s²，与真实角加速度无关）。
+    # 改用积分形式，不需要任何差分：
+    #     J·[ω(t2)-ω(t1)] = ∫(τ_pid - τ_g - τ_f·sign(ω))dt
+    # 对每段做梯形积分，未知量仍是 [J, τ_f]。
+    #
+    # ⚠️ gyro[1] 与 IMU pitch 变化方向相反（实测 10 段全部异号），先取反。
+    omega = -gyro
 
     # 重力分量（按 IMU 角度，度 → rad）
     gravity = np.array([gravity_torque(np.deg2rad(a)) for a in angle])
@@ -290,48 +281,60 @@ def analyze(path: str, min_speed: float = 0.3, min_acc: float = 2.0,
     # 净驱动力矩 = 总力矩 - 重力前馈
     net = torque - gravity
 
-    # 按段切分，每段只取"运动段"：速度够大、加速度够大，避开静止摩擦主导
-    segments = {}
+    def moving_average(x, n):
+        if n <= 1 or len(x) < n:
+            return x.copy()
+        kernel = np.ones(n) / n
+        padded = np.concatenate([np.full(n // 2, x[0]), x, np.full(n // 2, x[-1])])
+        return np.convolve(padded, kernel, mode="valid")[:len(x)]
+
+    omega_s = moving_average(omega, smooth)
+
+    # 逐段积分：取每段"从静止到速度峰值"的加速窗口，首末速度差才够大。
+    # 整段首末都静止（dω≈0）方程退化；只取运动中间段首末速度又太接近。
+    rows_design = []
+    print(f"\n{'段':>3} {'窗口':>5} {'t_ms':>7} {'dω':>9} {'∫net':>9} {'∫sgn':>8}")
     for s in sorted(set(seg)):
         if s < 0:
             continue
-        idx = np.flatnonzero(seg == s)
-        if len(idx) < 10:
+        i = np.flatnonzero(seg == s)
+        if len(i) < 10:
+            print(f"{s:3d} {len(i):5d}  样本不足")
             continue
-        moving = idx[np.abs(gyro[idx]) >= min_speed]
-        moving = moving[np.abs(alpha[moving]) >= min_acc]
-        if len(moving) < 5:
-            print(f"[!] 段{s} 运动样本不足（{len(moving)}），跳过")
+
+        # 在段内找速度绝对值最大的点，从段首积到该点（加速阶段）
+        w = omega_s[i]
+        k = int(np.argmax(np.abs(w)))
+        if k < 5:
+            print(f"{s:3d} {len(i):5d}  加速窗口太短")
             continue
-        segments[s] = moving
 
-    if len(segments) < 2:
-        raise RuntimeError("有效段不足 2 个，无法配对；检查阶跃幅值/保持时间")
+        win = i[:k + 1]
+        ts = t[win]
+        dw = omega_s[win][-1] - omega_s[win][0]
+        int_net = float(np.sum(0.5 * (net[win][1:] + net[win][:-1]) * np.diff(ts)))
+        int_sgn = float(np.sum(np.sign(omega_s[win])) * np.mean(np.diff(ts)))
 
-    print(f"\n{'段':>3} {'样本':>5} {'angle':>8} {'speed':>8} {'alpha':>9} {'net':>9}")
-    for s, idx in segments.items():
-        print(f"{s:3d} {len(idx):5d} {angle[idx].mean():8.3f} {gyro[idx].mean():8.3f} "
-              f"{alpha[idx].mean():9.3f} {net[idx].mean():9.4f}")
+        if abs(dw) < min_acc * 0.05:
+            print(f"{s:3d} {len(win):5d}  速度变化不足（dω={dw:+.3f}）")
+            continue
 
-    # 两未知量最小二乘：J·alpha + tau_f·sign(omega) = net
-    # 设计矩阵 [-alpha, sign(omega)]，解 [J, tau_f]；用所有运动样本联合求解，
-    # 比"正反向配对相减"稳（配对要求两方向速度/加速度幅值严格对称，实际做不到）。
-    alpha_all, net_all, sign_all = [], [], []
-    for idx in segments.values():
-        alpha_all.append(alpha[idx])
-        net_all.append(net[idx])
-        sign_all.append(np.sign(gyro[idx]))
+        rows_design.append((s, len(win), (ts[-1] - ts[0]) * 1000.0, dw, int_net, int_sgn))
+        print(f"{s:3d} {len(win):5d} {(ts[-1]-ts[0])*1000:7.0f} {dw:+9.3f} {int_net:+9.4f} {int_sgn:+8.3f}")
 
-    a = np.concatenate(alpha_all)
-    b = np.concatenate(net_all)
-    sgn = np.concatenate(sign_all)
+    if len(rows_design) < 2:
+        raise RuntimeError("有效段不足 2 个，无法分离 J 与摩擦")
 
-    # net = J*alpha + tau_f*sgn  →  未知量 [J, tau_f]
+    a = np.array([r[3] for r in rows_design])     # dω
+    b = np.array([r[4] for r in rows_design])     # ∫net
+    sgn = np.array([r[5] for r in rows_design])   # ∫sign(ω)dt
+
+    # J·dω = ∫net - τ_f·∫sign(ω)dt  →  J·dω + τ_f·∫sgn = ∫net
     design = np.column_stack([a, sgn])
     coeff, _, rank, _ = np.linalg.lstsq(design, b, rcond=None)
 
     if rank < 2:
-        raise RuntimeError("设计矩阵秩不足：正反向样本不对称，无法分离 J 与摩擦")
+        raise RuntimeError("设计矩阵秩不足：正反向不对称，无法分离 J 与摩擦")
 
     j_est, tau_f = float(coeff[0]), float(coeff[1])
     pred = design @ coeff
@@ -339,22 +342,18 @@ def analyze(path: str, min_speed: float = 0.3, min_acc: float = 2.0,
     ss_tot = float(((b - b.mean()) ** 2).sum())
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rmse = float(np.sqrt(((b - pred) ** 2).mean()))
-
-    # 共线性诊断：J 与 tau_f 是否可分。两列相关系数接近 ±1 时摩擦项不可辨识，
-    # 此时 J 仍可信（它是主项），但 tau_f 不能当结论用。
     cond = float(np.linalg.cond(design))
 
     print(f"\n[fit] J = {j_est:.6f} kg*m^2")
     print(f"[fit] 摩擦 tau_f = {tau_f:+.4f} N*m（仅当条件数低时可信）")
-    print(f"[fit] R2 = {r2:.4f}  RMSE = {rmse:.4f} N*m  样本 = {len(a)}  条件数 = {cond:.1f}")
+    print(f"[fit] R2 = {r2:.4f}  RMSE = {rmse:.4f} N*m*s  段数 = {len(a)}  条件数 = {cond:.1f}")
 
     if j_est <= 0:
         print("[!] J 非正：激励不足或符号约定不符，结果不可用", flush=True)
     elif r2 < 0.5:
-        print("[!] R2 偏低：摩擦模型不充分或数据噪声大，J 仅供参考", flush=True)
+        print("[!] R2 偏低：段数太少或摩擦模型不充分，J 仅供参考", flush=True)
     elif cond > 30.0:
-        print(f"[!] 条件数 {cond:.0f} 偏高：alpha 与 sign(omega) 共线，tau_f 不可辨识。"
-              "J 仍可用，但需增加匀速段（延长保持时间）才能分离摩擦。", flush=True)
+        print(f"[!] 条件数 {cond:.0f} 偏高：dω 与 ∫sgn 共线，tau_f 不可辨识", flush=True)
     else:
         print("[ok] 拟合可接受", flush=True)
 
