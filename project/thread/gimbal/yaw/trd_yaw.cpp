@@ -1,20 +1,21 @@
 /**
  * @file trd_yaw.cpp
  * @author qingyu
- * @brief 双 yaw 达妙电机初始化与反馈接入
- * @version 0.2
- * @date 2026-11-13
+ * @brief 小 yaw 达妙电机初始化与反馈接入
+ * @version 0.3
+ * @date 2026-11-17
  *
  * @copyright Copyright (c) 2026
  *
  */
 
+#include <algorithm>
+#include <cmath>
 #include <zephyr/zbus/zbus.h>
 #include "trd_yaw.hpp"
 #include "gimbal.hpp"
 #include "dt_meter.hpp"
 #include "stall_watch.hpp"
-#include "trd_yaw_coop.hpp"
 #include "to_can_tx.hpp"
 #include "thread.hpp"
 #include "Init_entry.hpp"
@@ -34,10 +35,7 @@ using namespace alg::math;
 
 static Thread<2048> thread_{};
 
-static Coop coop_ {};											// 大小 yaw 世界角分配
-static bool coop_ready_ = false;								// 已用当前姿态初始化
-
-static alg::pid::Pid   big_pid_  {};							// 大 yaw 关节角环
+static alg::pid::Pid   small_pid_ {};							// 小 yaw 世界角环
 static alg::monitor::DtMeter dt_meter_ {};						// 控制周期测量
 
 static topic::remote_to::Message remote_  {};					// 遥控最新状态，读失败保留旧值
@@ -49,9 +47,35 @@ static alg::monitor::StallWatch remote_watch_ {};				// 遥控停发检测（默
 static alg::monitor::StallWatch imu_watch_    {};				// IMU 停发检测（默认 100 拍）
 static gimbal::LostWatch  motor_watch_  { kLostCheckPeriod };	// 电机掉线检测
 
-static bool g_set_zero_big   = false;							// 大 yaw 设零请求，执行后自清
+static bool  g_set_zero_small = false;							// 小 yaw 设零请求，执行后自清
+static float target_deg_      = 0.0f;							// 小 yaw 世界目标角（度），由 var 设定
+static float world_ref_       = 0.0f;							// 遥控积分的世界目标角 rad
+static bool  world_ref_ready_ = false;							// 已用当前姿态初始化世界目标
 
-static float target_deg_ = 0.0f;								// 大 yaw 目标关节角（度），由 var 设定
+/**
+ * @brief 摩擦前馈力矩：库仑摩擦 + 静摩擦，结构同底盘 FrictionFeedforward
+ *
+ * 方向由误差 tanh 平滑（零位附近自动过渡，不靠死区）；
+ * 静摩擦按实际转速平方指数衰减回库仑值，真正停住时才拿满静摩擦。
+ *
+ * @param error 世界角误差 rad（当前 - 目标）
+ * @param omega 关节实际角速度 rad/s
+ * @return 前馈力矩 N*m
+ */
+static float FrictionFeedforward(float error, float omega)
+{
+    // 方向：误差取反后 tanh 平滑，误差为负表示需要正向运动
+    const float s        = std::tanh(-error / (kFricDirSmoothDeg * kDegToRad));
+    const bool  forward  = (s >= 0.0f);
+    const float a        = forward ? kFricCoulombPos : kFricCoulombNeg;
+    const float a_static = forward ? kFricStaticPos  : kFricStaticNeg;
+
+    // 静摩擦随实际转速平方指数衰减回库仑值
+    const float r     = omega / kFricSpeedSmooth;
+    const float a_eff = a + (a_static - a) * std::exp(-r * r);
+
+    return a_eff * s;
+}
 
 /**
  * @brief Retry 钩子：设零与未使能恢复，阻塞等待停稳
@@ -69,34 +93,34 @@ static bool OnRetry(void* context)
 	{
         uint8_t frame[8];
 
-        big_yaw_motor_.PackCmdFrame(frame, DmMotor::Cmd::Disable);
-        gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
+        small_yaw_motor_.PackCmdFrame(frame, DmMotor::Cmd::Disable);
+        gimbal::SendCmd(&user_can0_msgq, kSmallYawCanId, frame);
 
-        coop_ready_ = false;		// 重新开启时用当前姿态重建参考
+        world_ref_ready_ = false;		// 重新开启时用当前姿态重建参考
         return true;
     }
 
     if (!imu_alive) {
         uint8_t frame[8];
 
-        big_yaw_motor_.SetTargetTorque(0.0f);
-        big_yaw_motor_.PackCtrlFrame(frame);
-        gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
+        small_yaw_motor_.SetTargetTorque(0.0f);
+        small_yaw_motor_.PackCtrlFrame(frame);
+        gimbal::SendCmd(&user_can0_msgq, kSmallYawCanId, frame);
 
         return true;
     }
 
-    if (g_set_zero_big)
+    if (g_set_zero_small)
 	{
-        g_set_zero_big = false;
-        gimbal::SaveZero(big_yaw_motor_, &user_can1_msgq, kBigYawCanId);
+        g_set_zero_small = false;
+        gimbal::SaveZero(small_yaw_motor_, &user_can0_msgq, kSmallYawCanId);
         return true;
     }
 
-    if (!gimbal::Enabled(big_yaw_motor_))
+    if (!gimbal::Enabled(small_yaw_motor_))
 	{
-        DUST_LOG_WRN("yaw not enabled: err=%d", static_cast<int>(big_yaw_motor_.ReadAll().err));
-        if (gimbal::Enable(big_yaw_motor_, &user_can1_msgq, kBigYawCanId)) {
+        DUST_LOG_WRN("yaw not enabled: err=%d", static_cast<int>(small_yaw_motor_.ReadAll().err));
+        if (gimbal::Enable(small_yaw_motor_, &user_can0_msgq, kSmallYawCanId)) {
             DUST_LOG_INF("yaw re-enabled");
         }
     }
@@ -127,54 +151,57 @@ static TaskResult Task(void* context)
         return TaskResult::Retry;
     }
 
-    if (g_set_zero_big || !gimbal::Enabled(big_yaw_motor_)) {
+    if (g_set_zero_small || !gimbal::Enabled(small_yaw_motor_)) {
         return TaskResult::Retry;
     }
 
-    if (motor_watch_.Update(big_yaw_motor_)) {
+    if (motor_watch_.Update(small_yaw_motor_)) {
         DUST_LOG_ERR("yaw lost");
         return TaskResult::Retry;
     }
 
-    const DmMotor::Snapshot big = big_yaw_motor_.ReadAll();
+    float world_yaw = 0.0f, world_target = 0.0f, small_torque = 0.0f;
 
-    // 达妙反馈已是输出轴角度与角速度；大 yaw 逆时针为负，取反统一成逆时针为正
-    // 多圈累计值归一化到 [-π, π]
-    const float big_joint   = WrapRad(-big.radian);
-    const float small_joint = WrapRad(0.0f);
-    const float world_yaw   = WrapRad(imu_msg_.yaw * kDegToRad); // IMU 发布单位为度，转为 rad
+    // 关节角到 ±45° 软限时只停往外推的力矩，不反向拉回
+    const DmMotor::Snapshot small = small_yaw_motor_.ReadAll();
+    const float small_deg = WrapDeg(small.angle + kSmallAngleOffsetDeg);
 
-    // 首拍用当前姿态建立协同参考
-    if (!coop_ready_) {
-        coop_.Init(big_joint, world_yaw);
-        coop_ready_ = true;
+    world_yaw = WrapRad(imu_msg_.yaw * kDegToRad); // IMU 发布单位为度，转为 rad
+
+    // 首拍用当前世界角建立参考
+    if (!world_ref_ready_) {
+        world_ref_ = world_yaw;
+        world_ref_ready_ = true;
     }
 
-    // 世界角分配：得到两轴目标角
-    float big_target   = 0.0f;
-    float small_target = 0.0f;
-    float world_target = 0.0f;
-
-    // custom1=On 用 var 目标角；Off 用遥控协同
+    // custom1=On 用 var 目标角；Off 用遥控积分世界目标角
     if (remote_.custom1 == topic::remote_to::StartMode::On) {
-        big_target = WrapRad(target_deg_ * kDegToRad);
+        world_target = WrapRad(target_deg_ * kDegToRad);
     } else {
-        coop_.Update(remote_.yaw, world_yaw, big_joint, small_joint, dt, big_target, small_target, world_target);
+        world_ref_   = WrapRad(world_ref_ + remote_.yaw * kYawRateLimitRad * dt);
+        world_target = world_ref_;
     }
 
-    // 大轴闭环关节角误差，PID 目标恒为 0
-    const float big_err = WrapRad(big_joint - big_target);
+    // 小轴闭环世界角误差，PID 目标恒为 0
+    const float small_err = WrapRad(world_yaw - world_target);
 
-    const float big_torque = big_pid_.Calc(0.0f, big_err, dt);
+    small_torque  = small_pid_.Calc(world_target, small_err, dt);
 
-    // 大 yaw 物理方向相反，输出取反
+    small_torque += FrictionFeedforward(small_err, small.omega);
+
+    if (small_deg >= kSmallSoftLimitDeg) {
+        small_torque = std::min(small_torque, 0.0f);
+    } else if (small_deg <= -kSmallSoftLimitDeg) {
+        small_torque = std::max(small_torque, 0.0f);
+    }
+
     uint8_t frame[8];
 
-    big_yaw_motor_.SetTargetTorque(-big_torque);
-    big_yaw_motor_.PackCtrlFrame(frame);
-    gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
+    small_yaw_motor_.SetTargetTorque(small_torque);
+    small_yaw_motor_.PackCtrlFrame(frame);
+    gimbal::SendCmd(&user_can0_msgq, kSmallYawCanId, frame);
 
-    DUST_LOG_DBG("yaw_pid", "%f,%f,%f,%f,%f,%f", static_cast<double>(big_target * kRadToDeg), static_cast<double>(big_joint * kRadToDeg), static_cast<double>(big_err * kRadToDeg), static_cast<double>(big_torque), static_cast<double>(big_pid_.GetIntegralError()), static_cast<double>(dt * 1000000.0f));
+    DUST_LOG_DBG("yaw_pid", "%f,%f,%f", static_cast<double>(world_target * kRadToDeg), static_cast<double>(world_yaw * kRadToDeg), static_cast<double>(small_deg));
 
     return TaskResult::Continue;
 }
@@ -189,16 +216,16 @@ static bool thread_init()
     cfg.kp = 0.0f;
     cfg.kd = 0.0f;
 
-    // 暂按上位机截图配置，两台电机的实际读回量程需与此一致。
+    // 暂按上位机截图配置，电机的实际读回量程需与此一致。
     cfg.PMAX = 12.5f;
     cfg.VMAX = 30.0f;
     cfg.TMAX = 10.0f;
 
-    cfg.can_id    = kBigYawCanId;
-    cfg.master_id = kBigYawMasterId;
-    big_yaw_motor_.Init(cfg);
+    cfg.can_id    = kSmallYawCanId;
+    cfg.master_id = kSmallYawMasterId;
+    small_yaw_motor_.Init(cfg);
 
-    // 大 yaw PID：位置环输出力矩
+    // 小 yaw PID：位置环输出力矩
     alg::pid::Pid::Config pid_cfg {};
 
     pid_cfg.kp     = 1.0f;
@@ -206,9 +233,9 @@ static bool thread_init()
     pid_cfg.kd     = 0.0f;
     pid_cfg.outMax = kYawTorqueMax;
 
-    big_pid_.Init(pid_cfg);
+    small_pid_.Init(pid_cfg);
 
-    DUST_LOG_INF("yaw ready: big CAN1 0x01/0x11");
+    DUST_LOG_INF("yaw ready: small CAN0 0x03/0x13");
 
     return true;
 }
@@ -223,15 +250,15 @@ static bool thread_start()
     return true;
 }
 
-CAN_RX_HANDLER(USER_RX_CAN1, kBigYawMasterId,   [](uint8_t* data) { big_yaw_motor_  .CanCpltRxCallback(data); });
+CAN_RX_HANDLER(USER_RX_CAN0, kSmallYawMasterId, [](uint8_t* data) { small_yaw_motor_.CanCpltRxCallback(data); });
 
-REGISTER_SHELL_VAR("yaw_zero_big",   g_set_zero_big);
+REGISTER_SHELL_VAR("yaw_zero_small", g_set_zero_small);
 
-REGISTER_SHELL_VAR("yaw_big_target", target_deg_);
+REGISTER_SHELL_VAR("yaw_small_target", target_deg_);
 
-REGISTER_SHELL_VAR("yaw_big_kp",     big_pid_.GetKp());
-REGISTER_SHELL_VAR("yaw_big_ki",     big_pid_.GetKi());
-REGISTER_SHELL_VAR("yaw_big_kd",     big_pid_.GetKd());
+REGISTER_SHELL_VAR("yaw_small_kp",     small_pid_.GetKp());
+REGISTER_SHELL_VAR("yaw_small_ki",     small_pid_.GetKi());
+REGISTER_SHELL_VAR("yaw_small_kd",     small_pid_.GetKd());
 
 REGISTER_INIT(thread_init, MidInit, High, HaltOnFail, nullptr, "yaw_init");
 REGISTER_THREAD(thread_start, MidThread, ContinueOnFail, "yaw_start");

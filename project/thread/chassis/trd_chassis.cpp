@@ -94,11 +94,13 @@ static float InertiaFeedforward(uint8_t wheel, float omega, float dt)
 static float SpeedCurrent(uint8_t wheel, float target, float omega, float dt)
 {
     auto& pi = pid_[wheel];
-    const float feedforward = FrictionFeedforward(wheel, target, omega) + InertiaFeedforward(wheel, target, dt);
+    const float feedforward 	  = FrictionFeedforward(wheel, target, omega) + InertiaFeedforward(wheel, target, dt);
     const float previous_integral = pi.GetIntegralError();
-    float feedback = pi.Calc(target, omega, dt);
+
+    float feedback 	= pi.Calc(target, omega, dt);
+
     const float integral_delta = pi.GetKi() * (pi.GetIntegralError() - previous_integral);
-    const float requested = feedback + feedforward;
+    const float requested 	   = feedback + feedforward;
 
     // PID 内部只能看到反馈电流；前馈使总输出饱和时，也不能继续向饱和方向积分。
     if ((requested > kControlCurrentMax && integral_delta > 0.0f) || (requested < -kControlCurrentMax && integral_delta < 0.0f)) {
@@ -210,32 +212,6 @@ static TaskResult Task(void* context)
 	}
 
 	const int queue_rc = k_msgq_put(&user_can1_msgq, &tx, K_NO_WAIT);
-
-	// 日志快照最多 16 个整数参数，因此分成两种 15 列记录，共用本拍时间戳。
-	// chassis_ctrl：ms、dt(us)、入队返回值、目标转速[4]、反馈转速[4]、指令电流[4]。
-	// chassis_current：ms、dt(us)、入队返回值、指令电流[4]、反馈电流[4]、积分输出[4]。
-	// 转速单位 mrad/s，电流单位 mA；每组均按轮 0/1/2/3 排列。
-	// queue_rc=0 仅代表入队成功；实际 CAN 发送失败由 CAN TX 线程另行记录。
-	const unsigned log_ms = static_cast<unsigned>(k_uptime_get_32());
-	DUST_LOG_DBG("chassis_ctrl", "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-	             log_ms, static_cast<int>(dt * 1.0e6f), queue_rc,
-	             static_cast<int>(target[0] * 1000.0f), static_cast<int>(target[1] * 1000.0f),
-	             static_cast<int>(target[2] * 1000.0f), static_cast<int>(target[3] * 1000.0f),
-	             static_cast<int>(feedback[0].omega * 1000.0f), static_cast<int>(feedback[1].omega * 1000.0f),
-	             static_cast<int>(feedback[2].omega * 1000.0f), static_cast<int>(feedback[3].omega * 1000.0f),
-	             static_cast<int>(current[0] * 1000.0f), static_cast<int>(current[1] * 1000.0f),
-	             static_cast<int>(current[2] * 1000.0f), static_cast<int>(current[3] * 1000.0f));
-
-	DUST_LOG_DBG("chassis_current", "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-	             log_ms, static_cast<int>(dt * 1.0e6f), queue_rc,
-	             static_cast<int>(current[0] * 1000.0f), static_cast<int>(current[1] * 1000.0f),
-	             static_cast<int>(current[2] * 1000.0f), static_cast<int>(current[3] * 1000.0f),
-	             static_cast<int>(feedback[0].current * 1000.0f), static_cast<int>(feedback[1].current * 1000.0f),
-	             static_cast<int>(feedback[2].current * 1000.0f), static_cast<int>(feedback[3].current * 1000.0f),
-	             static_cast<int>(pid_[0].GetKi() * pid_[0].GetIntegralError() * 1000.0f),
-	             static_cast<int>(pid_[1].GetKi() * pid_[1].GetIntegralError() * 1000.0f),
-	             static_cast<int>(pid_[2].GetKi() * pid_[2].GetIntegralError() * 1000.0f),
-	             static_cast<int>(pid_[3].GetKi() * pid_[3].GetIntegralError() * 1000.0f));
 
 	return TaskResult::Continue;
 }

@@ -89,6 +89,7 @@ static float SmoothDownTarget(float target, float now, float dt)
 	constexpr float duration = 2.0f;
 	auto& curve = down_target_curve_;
 	auto& c = curve.coefficient;
+	
 	if (!curve.initialized)
 	{
 		curve.position = now;
@@ -99,7 +100,7 @@ static float SmoothDownTarget(float target, float now, float dt)
 
 	if (target != curve.target)
 	{
-		const float delta       = target - curve.position;
+		const float delta        = target - curve.position;
 		const float velocity     = curve.velocity * duration;
 		const float acceleration = curve.acceleration * duration * duration;
 		c[0] = curve.position;
