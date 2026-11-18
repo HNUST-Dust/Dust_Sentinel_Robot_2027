@@ -73,6 +73,11 @@ if(CONFIG_TRD_REMOTE)
 	)
 endif()
 
+if(CONFIG_TRD_ECAT)
+	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ecat/trd_ecat.cpp)
+	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ecat)
+endif()
+
 if(CONFIG_TRD_TEST)
 	target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/trd_test.cpp)
 	target_include_directories(app PRIVATE

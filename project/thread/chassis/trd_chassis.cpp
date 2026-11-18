@@ -32,11 +32,11 @@ namespace thread::chassis {
 
 using namespace instance::chassis;
 
-static Thread<2048> thread_{};
+static Thread<2048>  thread_{};
 static alg::pid::Pid pid_[N_Wheel] {};
 
 static alg::monitor::DtMeter dt_meter_ {};			// 控制周期测量
-static float last_target_[N_Wheel] {};				// 惯性前馈上一拍目标
+static float last_target_ [N_Wheel] {};				// 惯性前馈上一拍目标
 static bool  target_valid_[N_Wheel] {};				// 闭环切入首拍不做目标差分
 
 /**
@@ -163,7 +163,7 @@ static TaskResult Task(void* context)
 	}
 
 	DUST_LOG_DBG("wheel12", "%.2f,%.2f,%.2f,%.2f", static_cast<double>(feedback[0].omega), static_cast<double>(feedback[1].omega),
-	             static_cast<double>(feedback[2].omega), static_cast<double>(feedback[3].omega));
+	             											 static_cast<double>(feedback[2].omega), static_cast<double>(feedback[3].omega));
 
 	// 逆运动学反解：轮角速度 → 底盘实际速度 (m/s)
 	{
@@ -260,7 +260,7 @@ bool thread_init()
 
 		chassis_motor_[i].Init(motor_cfg);
 		pid_[i].Init(pid_cfg);
-		
+
 		DUST_LOG_INF("wheel%u PI: kp=%.6f ki=%.6f", static_cast<unsigned>(i), static_cast<double>(pid_cfg.kp), static_cast<double>(pid_cfg.ki));
 	}
 

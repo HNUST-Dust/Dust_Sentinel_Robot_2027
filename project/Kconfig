@@ -39,7 +39,7 @@ config USE_CMD_SHELL
 
 config TRD_CAN_TX
     bool "CAN TX thread"
-    default y
+    default n
     select DUST_COM_CAN
     select DUST_TPC_TO_CAN_TX
     help
@@ -51,7 +51,7 @@ config TRD_CAN_TX
 
 config TRD_CHASSIS
     bool "Chassis thread"
-    default y
+    default n
     select DUST_MOD_DEV_MOTOR_DJI
     select DUST_CTL_PID
     select DUST_FLT_LPF
@@ -67,7 +67,7 @@ config TRD_CHASSIS
 
 config TRD_YAW
     bool "Yaw motor initialization"
-    default y
+    default n
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -79,7 +79,7 @@ config TRD_YAW
 
 config TRD_PITCH_UP
     bool "Up pitch motor"
-    default y
+    default n
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -90,7 +90,7 @@ config TRD_PITCH_UP
 
 config TRD_PITCH_DOWN
     bool "Down pitch motor"
-    default y
+    default n
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -101,7 +101,7 @@ config TRD_PITCH_DOWN
 
 config TRD_IMU
     bool "IMU thread"
-    default y
+    default n
     select DUST_MOD_DEV_IMU
     select DUST_MOD_DEV_IMU_ICM42688P
     help
@@ -125,7 +125,7 @@ config TRD_GPIO
 
 config TRD_REMOTE
     bool "Remote thread"
-    default y
+    default n
     select DUST_MOD_DEV_REMOTE
     select DUST_MOD_DEV_REMOTE_AUTO
     help
@@ -134,6 +134,17 @@ config TRD_REMOTE
 # ============================================================================
 
 # =================               TRD_TEST                ====================
+
+config TRD_ECAT
+    bool "HPM5E31 EtherCAT slave"
+    default y
+    depends on DUST_ECAT_HAL_HPM
+    select DUST_COM_ETHERCAT
+    select DUST_DEV_ECAT_PHY_RTL8201F
+    select DUST_ECAT_SII_FLASH_READONLY
+    help
+      Enable a 1 ms EtherCAT task with RTL8201F on port 0; port 1 has no PHY.
+      Each PDO direction contains 64 uint32_t words (256 bytes).
 
 config TRD_TEST
     bool "IMU attitude diagnosis"
