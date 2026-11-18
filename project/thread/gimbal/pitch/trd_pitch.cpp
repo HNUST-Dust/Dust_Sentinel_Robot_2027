@@ -290,8 +290,7 @@ static TaskResult Task(void* context)
 
 		const float up_now_rad	   = imu_msg_.pitch * kDegToRad;					// IMU 发布单位为度，取反统一方向后转 rad
 		// custom1=On 用 var 目标角；Off 用遥控 [-1,1] 线性映射到机械限位
-		const float up_target_deg  = (remote_.custom1 == topic::remote_to::StartMode::On) ? up_target_deg_ : kUpPitchMinDeg + (kUpPitchMaxDeg - kUpPitchMinDeg) * (-remote_.pitch + 1.0f) * 0.5f;
-		const float up_target_rad  = up_target_deg  * kDegToRad;
+		const float up_target_rad  = up_target_deg_  * kDegToRad;
 		const float up_err 	   	   = WrapRad(up_now_rad - up_target_rad);
 
 		const float up_pid_torque  = up_pid_.Calc(0.0f, up_err, dt);
@@ -302,7 +301,7 @@ static TaskResult Task(void* context)
 		up_pitch_motor_.PackCtrlFrame(frame);
 		gimbal::SendCmd(&user_can0_msgq, kUpPitchCanId, frame);
 
-		DUST_LOG_DBG("pitch_up_track", "%d,%d", static_cast<int>(up_target_deg * 1000.0f), static_cast<int>(imu_msg_.pitch * 1000.0f));
+		DUST_LOG_DBG("pitch_up_track", "%d,%d", static_cast<int>(up_target_deg_ * 1000.0f), static_cast<int>(imu_msg_.pitch * 1000.0f));
 	}
 	#endif
 

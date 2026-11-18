@@ -74,7 +74,8 @@ config TRD_YAW
     select DUST_MON_DTMETER
     select DUST_MON_STALLWATCH
     help
-      Initialize big yaw on CAN1 and small yaw on CAN0, without enabling motors.
+      Control big yaw on CAN1 with IMU yaw feedback, and hold small yaw
+      on CAN0 at zero using motor angle feedback.
 
 config TRD_PITCH_UP
     bool "Up pitch motor"
