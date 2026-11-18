@@ -16,6 +16,34 @@
 
 namespace instance::gimbal {
 
+K_MUTEX_DEFINE(chassis_yaw_mutex_);
+float chassis_relative_to_gimbal_yaw_rad = 0.0f;
+
+/**
+ * @brief Set the Chassis Relative Yaw object
+ *
+ * @param angle_rad
+ */
+void SetChassisRelativeYaw(float angle_rad)
+{
+    k_mutex_lock(&chassis_yaw_mutex_, K_FOREVER);
+    chassis_relative_to_gimbal_yaw_rad = angle_rad;
+    k_mutex_unlock(&chassis_yaw_mutex_);
+}
+
+/**
+ * @brief Get the Chassis Relative Yaw object
+ *
+ * @return float
+ */
+float GetChassisRelativeYaw()
+{
+    k_mutex_lock(&chassis_yaw_mutex_, K_FOREVER);
+    const float angle_rad = chassis_relative_to_gimbal_yaw_rad;
+    k_mutex_unlock(&chassis_yaw_mutex_);
+    return angle_rad;
+}
+
 static constexpr uint32_t kSettleMs = 1000;		// 命令之间的等待
 
 /**

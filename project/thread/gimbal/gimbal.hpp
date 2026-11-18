@@ -17,6 +17,18 @@
 
 namespace instance::gimbal {
 
+// 底盘相对云台的偏角：theta_chassis - theta_gimbal，rad，[-pi, pi]。
+// 从上往下看逆时针为正；两个 yaw 电机零位对应底盘与云台朝向一致。
+// 读写均由同一个互斥锁保护，仅在线程上下文调用。
+// 云台系速度转底盘系：v_chassis = R(-chassis_relative_to_gimbal_yaw_rad) * v_gimbal。
+// 直接访问变量时必须持有 chassis_yaw_mutex_；常规读写使用下面的接口。
+extern k_mutex chassis_yaw_mutex_;
+extern float chassis_relative_to_gimbal_yaw_rad;
+
+void  SetChassisRelativeYaw(float angle_rad);
+
+float GetChassisRelativeYaw();
+
 /**
  * @brief 电机掉线检测：按拍数分频调用 PwrLossCheck
  *

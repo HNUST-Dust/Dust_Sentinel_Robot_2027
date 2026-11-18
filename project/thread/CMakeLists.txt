@@ -37,6 +37,7 @@ endif()
 if(CONFIG_TRD_YAW)
 	target_sources(app PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/gimbal/yaw/trd_yaw.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/gimbal/yaw/trd_yaw_coop.cpp
 	)
 	target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gimbal/yaw)
 endif()

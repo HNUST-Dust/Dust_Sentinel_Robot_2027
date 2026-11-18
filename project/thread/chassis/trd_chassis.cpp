@@ -16,6 +16,9 @@
 #include <cstdint>
 #include <zephyr/zbus/zbus.h>
 #include "trd_chassis.hpp"
+#if defined(CONFIG_TRD_YAW)
+#include "gimbal.hpp"
+#endif
 #include "dt_meter.hpp"
 #include "thread.hpp"
 #include "Init_entry.hpp"
@@ -129,15 +132,29 @@ static TaskResult Task(void* context)
 	(void)context;
 
 	static topic::remote_to::Message msg{};
-	const zbus_channel* chan = nullptr;
 
 	const float dt = dt_meter_.Update();		// 本拍周期，惯性前馈用
 
-	zbus_sub_wait(&sub_remote_to, &chan, K_NO_WAIT);
+	// 直接读话题：每拍取最新状态，不积压历史通知；读失败保留上一帧值
+	zbus_chan_read(&pub_remote_to, &msg, K_NO_WAIT);
 
-	if (chan != nullptr) {
-		zbus_chan_read(chan, &msg, K_NO_WAIT);
+	// 偏角每拍只读一次，锁内复制数值，旋转计算放在锁外。
+	float relative_yaw = 0.0f;
+
+	#if defined(CONFIG_TRD_YAW)
+	{
+		relative_yaw = instance::gimbal::GetChassisRelativeYaw();
 	}
+	#endif
+
+	const float c = std::cos(relative_yaw);
+	const float s = std::sin(relative_yaw);
+	const bool  enabled    = msg.robot_ctrl != topic::remote_to::StartMode::Off;
+	const float gimbal_vx  = enabled ? msg.chassisx * chassis_v : 0.0f;
+	const float gimbal_vy  = enabled ? msg.chassisy * chassis_v : 0.0f;
+	// 云台系 -> 底盘系：R(-relative_yaw)，保持原有旋转速度。
+	const float chassis_vx = c * gimbal_vx + s * gimbal_vy;
+	const float chassis_vy = -s * gimbal_vx + c * gimbal_vy;
 
 	// 控制和诊断共用本拍快照，避免同一行里混入不同读取时刻的数据。
 	motor::dji::DjiC620::Snapshot feedback[N_Wheel] {};
@@ -160,16 +177,13 @@ static TaskResult Task(void* context)
 		const float vx = (-w0 - w1 + w2 + w3) * kInv4Sqrt2 * kWheelRadius;
 		const float vy = ( w0 - w1 - w2 + w3) * kInv4Sqrt2 * kWheelRadius;
 
-		const bool enabled = msg.robot_ctrl != topic::remote_to::StartMode::Off;
-		const float target_vx = enabled ? msg.chassisx * chassis_v : 0.0f;
-		const float target_vy = enabled ? msg.chassisy * chassis_v : 0.0f;
 
 		// 目标 vx、目标 vy、反馈 vx、反馈 vy，单位均为 m/s。
-		DUST_LOG_DBG("chassis_v", "%.3f,%.3f,%.3f,%.3f", static_cast<double>(target_vx), static_cast<double>(target_vy), static_cast<double>(vx), static_cast<double>(vy));
+		DUST_LOG_DBG("chassis_v", "%.3f,%.3f,%.3f,%.3f", static_cast<double>(chassis_vx), static_cast<double>(chassis_vy), static_cast<double>(vx), static_cast<double>(vy));
 	}
 
 	float current[N_Wheel] {};
-	float target[N_Wheel] {};
+	float target[N_Wheel]  {};
 
 	if (msg.robot_ctrl == topic::remote_to::StartMode::Off)
 	{
@@ -184,8 +198,8 @@ static TaskResult Task(void* context)
 		static constexpr float kSqrt2 = 1.41421356f;                    		// 对角线 → 边投影
 
 		// 轮角速度 = 底盘线速度 / 轮半径
-		const float vx =  msg.chassisx * chassis_v / kWheelRadius;
-		const float vy =  msg.chassisy * chassis_v / kWheelRadius;
+		const float vx = chassis_vx / kWheelRadius;
+		const float vy = chassis_vy / kWheelRadius;
 		const float wz = (msg.chassis_mode == topic::remote_to::ChassisMode::Spin) ? chassis_w : 0.0f;
 
 		target[0] = (-vx + vy) * kSqrt2 + wz;
@@ -211,7 +225,7 @@ static TaskResult Task(void* context)
 		chassis_motor_[i].PackCurrent(tx.data, current[i]);
 	}
 
-	const int queue_rc = k_msgq_put(&user_can1_msgq, &tx, K_NO_WAIT);
+	k_msgq_put(&user_can1_msgq, &tx, K_NO_WAIT);
 
 	return TaskResult::Continue;
 }
@@ -246,6 +260,7 @@ bool thread_init()
 
 		chassis_motor_[i].Init(motor_cfg);
 		pid_[i].Init(pid_cfg);
+		
 		DUST_LOG_INF("wheel%u PI: kp=%.6f ki=%.6f", static_cast<unsigned>(i), static_cast<double>(pid_cfg.kp), static_cast<double>(pid_cfg.ki));
 	}
 

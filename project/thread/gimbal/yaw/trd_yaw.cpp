@@ -9,8 +9,10 @@
  *
  */
 
+#include <algorithm>
 #include <zephyr/zbus/zbus.h>
 #include "trd_yaw.hpp"
+#include "trd_yaw_coop.hpp"
 #include "dm.hpp"
 #include "gimbal.hpp"
 #include "dt_meter.hpp"
@@ -34,8 +36,8 @@ using namespace alg::math;
 
 static Thread<2048> thread_{};
 
-static alg::pid::Pid   		 big_pid_ {};								// 大 yaw 世界角环
-static alg::pid::Pid small_pid_ {}; // 小 yaw 电机角度环，目标恒为 0
+static alg::pid::Pid big_pid_ {};										// 大 yaw 世界角环
+static alg::pid::Pid small_pid_ {}; 									// 小 yaw IMU 世界角环
 static alg::monitor::DtMeter dt_meter_ 	{};								// 控制周期测量
 
 static topic::remote_to::Message remote_  {};							// 遥控最新状态，读失败保留旧值
@@ -52,9 +54,8 @@ static gimbal::LostWatch small_motor_watch_ { kLostCheckPeriod };
 static bool g_set_zero_small = false;
 
 static bool  g_set_zero_big = false;									// 大 yaw 设零请求，执行后自清
-static float target_deg_      = 0.0f;									// 大 yaw 世界目标角（度），由 var 设定
-static float world_ref_       = 0.0f;									// 遥控积分的世界目标角 rad
-static bool  world_ref_ready_ = false;									// 已用当前姿态初始化世界目标
+static Coop coop_ {};
+static bool coop_ready_ = false; // 已用当前姿态初始化协同参考
 
 /**
  * @brief Retry 钩子：设零与未使能恢复，阻塞等待停稳
@@ -77,7 +78,7 @@ static bool OnRetry(void* context)
         small_yaw_motor_.PackCmdFrame(frame, DmMotor::Cmd::Disable);
         gimbal::SendCmd(&user_can0_msgq, kSmallYawCanId, frame);
 
-        world_ref_ready_ = false;		// 重新开启时用当前姿态重建参考
+        coop_ready_ = false;		// 重新开启时用当前姿态重建参考
         return true;
     }
 
@@ -97,12 +98,14 @@ static bool OnRetry(void* context)
     if (g_set_zero_big)
 	{
         g_set_zero_big = false;
+        coop_ready_ = false;
         gimbal::SaveZero(big_yaw_motor_, &user_can1_msgq, kBigYawCanId);
         return true;
     }
 
     if (g_set_zero_small) {
         g_set_zero_small = false;
+        coop_ready_ = false;
         gimbal::SaveZero(small_yaw_motor_, &user_can0_msgq, kSmallYawCanId);
         return true;
     }
@@ -136,6 +139,11 @@ static TaskResult Task(void* context)
 
     const float dt = dt_meter_.Update();
 
+    const float big_joint   = WrapRad(-big_yaw_motor_.ReadAll().radian);
+    const float small_joint = WrapRad(small_yaw_motor_.ReadAll().radian);
+    // 相对偏角只由两轴关节角决定，不依赖 IMU 世界零位。整车关闭时也更新。
+    gimbal::SetChassisRelativeYaw(WrapRad(-big_joint - small_joint));
+
     // 直接读话题：每拍取最新状态，不积压历史通知；读失败保留上一帧值
     zbus_chan_read(&pub_remote_to, &remote_,  K_NO_WAIT);
     zbus_chan_read(&pub_imu_to,    &imu_msg_, K_NO_WAIT);
@@ -161,42 +169,49 @@ static TaskResult Task(void* context)
         return TaskResult::Retry;
     }
 
-    const float world_yaw = WrapRad(imu_msg_.yaw * kDegToRad); // IMU 发布单位为度，转为 rad
-    float world_target = 0.0f;
+    const float world_yaw   = WrapRad(imu_msg_.yaw * kDegToRad);
 
-    // 首拍用当前世界角建立参考
-    if (!world_ref_ready_) {
-        world_ref_ = world_yaw;
-        world_ref_ready_ = true;
+    if (!coop_ready_) {
+        coop_.Init(big_joint, world_yaw);
+        coop_ready_ = true;
     }
 
-    // custom1=On 用 var 目标角；Off 用遥控积分世界目标角
-    if (remote_.custom1 == topic::remote_to::StartMode::On) {
-        world_target = WrapRad(target_deg_ * kDegToRad);
-    } else {
-        world_ref_   = WrapRad(world_ref_ + remote_.yaw * kYawRateLimitRad * dt);
-        world_target = world_ref_;
-    }
+    // 直接使用遥控 yaw 输入积分世界目标
+    float big_target = 0.0f, small_target = 0.0f, world_target = 0.0f;
 
-	uint8_t frame[8];
+    coop_.Update(remote_.yaw, world_yaw, big_joint, small_joint, dt, big_target, small_target, world_target);
 
-	// 小 yaw 直接使用电机角度反馈，以电机零位为固定目标
-    const float small_angle  = WrapRad(small_yaw_motor_.ReadAll().radian);
-    const float small_torque = small_pid_.Calc(0.0f, small_angle, dt);
-    small_yaw_motor_.SetTargetTorque(small_torque);
-    small_yaw_motor_.PackCtrlFrame(frame);
-    gimbal::SendCmd(&user_can0_msgq, kSmallYawCanId, frame);
+    uint8_t frame[8];
 
-    // 大 yaw 使用 IMU 世界角反馈，角度误差归一化到 [-pi, pi]
-    const float big_err = WrapRad(world_yaw - world_target);
-    const float big_torque = big_pid_.Calc(0.0f, big_err, dt);
+	{
+		// 小轴用 IMU yaw 跟踪世界目标，电机角度仅用于分配和限位
+		const float small_err = WrapRad(world_yaw - world_target);
+		float small_torque    = small_pid_.Calc(0.0f, small_err, dt);
+
+		if (small_joint >= kSmallHardLimitRad) {
+			small_torque = std::min(small_torque, 0.0f);
+		} else if (small_joint <= -kSmallHardLimitRad) {
+			small_torque = std::max(small_torque, 0.0f);
+		}
+
+		small_yaw_motor_.SetTargetTorque(small_torque);
+		small_yaw_motor_.PackCtrlFrame(frame);
+		gimbal::SendCmd(&user_can0_msgq, kSmallYawCanId, frame);
+	}
+
+
+    // IMU 总角扣除小轴实际角，大轴跟踪世界目标中分配给自己的部分
+    const float big_world_yaw    = WrapRad(world_yaw - small_joint);
+    const float big_world_target = WrapRad(world_target - small_target);
+    const float big_err 		 = WrapRad(big_world_yaw - big_world_target);
+    const float big_torque 		 = big_pid_.Calc(0.0f, big_err, dt);
 
     // 大 yaw 电机方向与 IMU yaw 正方向相反
     big_yaw_motor_.SetTargetTorque(-big_torque);
     big_yaw_motor_.PackCtrlFrame(frame);
     gimbal::SendCmd(&user_can1_msgq, kBigYawCanId, frame);
 
-    DUST_LOG_DBG("yaw_pid", "%f,%f", static_cast<double>(world_target * kRadToDeg), static_cast<double>(world_yaw * kRadToDeg));
+    DUST_LOG_DBG("yaw_pid", "%f,%f", static_cast<double>(WrapDeg(small_yaw_motor_.ReadAll().angle)), static_cast<double>(WrapDeg(big_yaw_motor_.ReadAll().angle)));
 
     return TaskResult::Continue;
 }
@@ -219,7 +234,7 @@ static bool thread_init()
     };
 
 	{
-		// 小 yaw 独立位置环，目标不受遥控或 var 改变
+		// 小 yaw IMU 世界角环
 		pid_cfg.kp = 0.8f;
 		pid_cfg.ki = 0.0f;
 		pid_cfg.kd = 0.2f;
@@ -267,7 +282,6 @@ REGISTER_SHELL_VAR("yaw_small_kd", small_pid_.GetKd());
 
 REGISTER_SHELL_VAR("yaw_zero_big", g_set_zero_big);
 
-REGISTER_SHELL_VAR("yaw_big_target", target_deg_);
 
 REGISTER_SHELL_VAR("yaw_big_kp",   big_pid_.GetKp());
 REGISTER_SHELL_VAR("yaw_big_ki",   big_pid_.GetKi());
