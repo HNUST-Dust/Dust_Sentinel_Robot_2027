@@ -20,8 +20,8 @@ static ::imu::ImuManager imu_ {};
 
 // 本颗 IMU 的静态零偏（gyro rad/s，accel m/s^2）
 static constexpr ImuOffsetData kOffset {
-     { 0.009880f,  0.011681f, -0.009188f },
-    { -0.052499f, 0.056969f, 1.115934f  }
+    {  0.009880f,  0.011681f, -0.009188f },
+    { -0.052499f,  0.056969f,  1.115934f }
 };
 
 // 姿态 EKF 参数
@@ -36,7 +36,8 @@ static constexpr alg::attitude::QuaternionEkf::Config kEkf
 };
 
 // 加热控温参数
-static constexpr heater::Config kHeater {
+static constexpr heater::Config kHeater 
+{
     .target_temp = 40.0f,
     .duty_min    = 0.0f,
     .duty_max    = 0.95f,

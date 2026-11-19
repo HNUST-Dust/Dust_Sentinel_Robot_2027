@@ -39,9 +39,10 @@ config USE_CMD_SHELL
 
 config TRD_CAN_TX
     bool "CAN TX thread"
-    default n
+    default y
     select DUST_COM_CAN
     select DUST_TPC_TO_CAN_TX
+    select POLL
     help
       Enable CAN TX thread.
 
@@ -51,12 +52,13 @@ config TRD_CAN_TX
 
 config TRD_CHASSIS
     bool "Chassis thread"
-    default n
+    default y
     select DUST_MOD_DEV_MOTOR_DJI
     select DUST_CTL_PID
     select DUST_FLT_LPF
     select DUST_MON_DTMETER
     select DUST_TPC_TO_CAN_TX
+    select DUST_MON_STALLWATCH
     select DUST_TPC_REMOTE_TO
     help
       Enable omni chassis thread (remote velocity -> inverse kinematics -> C620 current).
@@ -67,7 +69,7 @@ config TRD_CHASSIS
 
 config TRD_YAW
     bool "Yaw motor initialization"
-    default n
+    default y
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -79,7 +81,7 @@ config TRD_YAW
 
 config TRD_PITCH_UP
     bool "Up pitch motor"
-    default n
+    default y
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -90,7 +92,7 @@ config TRD_PITCH_UP
 
 config TRD_PITCH_DOWN
     bool "Down pitch motor"
-    default n
+    default y
     select TRD_CAN_TX
     select DUST_MOD_DEV_MOTOR_DM
     select DUST_MATH_ANGLE
@@ -101,7 +103,7 @@ config TRD_PITCH_DOWN
 
 config TRD_IMU
     bool "IMU thread"
-    default n
+    default y
     select DUST_MOD_DEV_IMU
     select DUST_MOD_DEV_IMU_ICM42688P
     help
@@ -125,7 +127,7 @@ config TRD_GPIO
 
 config TRD_REMOTE
     bool "Remote thread"
-    default n
+    default y
     select DUST_MOD_DEV_REMOTE
     select DUST_MOD_DEV_REMOTE_AUTO
     help

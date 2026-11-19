@@ -16,10 +16,14 @@
 #include <cstdint>
 #include <zephyr/zbus/zbus.h>
 #include "trd_chassis.hpp"
+#if defined(CONFIG_TRD_ECAT)
+#include "trd_ecat.hpp"
+#endif
 #if defined(CONFIG_TRD_YAW)
 #include "gimbal.hpp"
 #endif
 #include "dt_meter.hpp"
+#include "stall_watch.hpp"
 #include "thread.hpp"
 #include "Init_entry.hpp"
 #include "remote_to.hpp"
@@ -31,6 +35,13 @@
 namespace thread::chassis {
 
 using namespace instance::chassis;
+using topic::remote_to::Message;
+using topic::remote_to::StartMode;
+using topic::remote_to::ChassisMode;
+
+#if defined(CONFIG_TRD_ECAT)
+namespace ecat = instance::ecat;
+#endif
 
 static Thread<2048>  thread_{};
 static alg::pid::Pid pid_[N_Wheel] {};
@@ -38,6 +49,72 @@ static alg::pid::Pid pid_[N_Wheel] {};
 static alg::monitor::DtMeter dt_meter_ {};			// 控制周期测量
 static float last_target_ [N_Wheel] {};				// 惯性前馈上一拍目标
 static bool  target_valid_[N_Wheel] {};				// 闭环切入首拍不做目标差分
+
+static alg::monitor::StallWatch remote_watch_ {};    // 遥控停更检测，与云台线程一致
+
+/**
+ * @brief 选择底盘速度来源：SB 上档使用导航，其余档位使用遥控
+ * @param remote 遥控状态快照
+ * @param vx     底盘前向速度 m/s
+ * @param vy     底盘左向速度 m/s
+ * @param wz     小陀螺轮速分量 rad/s，导航固定朝向时为零
+ * @return true=允许底盘闭环，false=输出电流归零
+ */
+static bool ReadVelocity(const Message& remote, float& vx, float& vy, float& wz)
+{
+    vx = vy = wz = 0.0;
+
+    const bool remote_lost = remote_watch_.Update(remote.version);
+
+    if (remote_lost || remote.robot_ctrl == StartMode::Off) {
+        return false;
+    }
+
+    // SB 上档：导航速度已在底盘系，不做遥控缩放与云台坐标旋转。
+    if (remote.custom1 == StartMode::On)
+    {
+		#if defined(CONFIG_TRD_ECAT)
+		{
+			k_mutex_lock(&ecat::chassis_command_mutex_, K_FOREVER);
+			const ecat::ChassisCommand command = ecat::chassis_command_;
+			k_mutex_unlock(&ecat::chassis_command_mutex_);
+
+			if (!command.valid) {
+				return false;
+			}
+
+			vx = command.velocity.linear_x;
+			vy = command.velocity.linear_y;
+
+			return true;
+		}
+		#else
+		{
+			return false;
+		}
+		#endif
+    }
+
+    // 遥控速度由云台系转到底盘系：R(-relative_yaw)。
+    float relative_yaw = 0.0f;
+
+	#if defined(CONFIG_TRD_YAW)
+	{
+		relative_yaw = instance::gimbal::GetChassisRelativeYaw();
+	}
+	#endif
+
+    const float c = std::cos(relative_yaw);
+    const float s = std::sin(relative_yaw);
+    const float gimbal_vx = remote.chassisx * chassis_v;
+    const float gimbal_vy = remote.chassisy * chassis_v;
+
+    vx =  c * gimbal_vx + s * gimbal_vy;
+    vy = -s * gimbal_vx + c * gimbal_vy;
+    wz = (remote.chassis_mode == ChassisMode::Spin) ? chassis_w : 0.0f;
+
+    return true;
+}
 
 /**
  * @brief 摩擦前馈电流：按该轮辨识的库仑+黏性+静摩擦模型算出维持该转速所需电流
@@ -131,30 +208,18 @@ static TaskResult Task(void* context)
 {
 	(void)context;
 
-	static topic::remote_to::Message msg{};
+	static Message msg{};
 
 	const float dt = dt_meter_.Update();		// 本拍周期，惯性前馈用
 
 	// 直接读话题：每拍取最新状态，不积压历史通知；读失败保留上一帧值
 	zbus_chan_read(&pub_remote_to, &msg, K_NO_WAIT);
 
-	// 偏角每拍只读一次，锁内复制数值，旋转计算放在锁外。
-	float relative_yaw = 0.0f;
+	float chassis_vx = 0.0f;
+	float chassis_vy = 0.0f;
+	float chassis_wz = 0.0f;
 
-	#if defined(CONFIG_TRD_YAW)
-	{
-		relative_yaw = instance::gimbal::GetChassisRelativeYaw();
-	}
-	#endif
-
-	const float c = std::cos(relative_yaw);
-	const float s = std::sin(relative_yaw);
-	const bool  enabled    = msg.robot_ctrl != topic::remote_to::StartMode::Off;
-	const float gimbal_vx  = enabled ? msg.chassisx * chassis_v : 0.0f;
-	const float gimbal_vy  = enabled ? msg.chassisy * chassis_v : 0.0f;
-	// 云台系 -> 底盘系：R(-relative_yaw)，保持原有旋转速度。
-	const float chassis_vx = c * gimbal_vx + s * gimbal_vy;
-	const float chassis_vy = -s * gimbal_vx + c * gimbal_vy;
+	const bool enabled = ReadVelocity(msg, chassis_vx, chassis_vy, chassis_wz);
 
 	// 控制和诊断共用本拍快照，避免同一行里混入不同读取时刻的数据。
 	motor::dji::DjiC620::Snapshot feedback[N_Wheel] {};
@@ -185,7 +250,7 @@ static TaskResult Task(void* context)
 	float current[N_Wheel] {};
 	float target[N_Wheel]  {};
 
-	if (msg.robot_ctrl == topic::remote_to::StartMode::Off)
+	if (!enabled)
 	{
 		for (uint8_t i = 0; i < N_Wheel; ++i)
 		{
@@ -200,7 +265,7 @@ static TaskResult Task(void* context)
 		// 轮角速度 = 底盘线速度 / 轮半径
 		const float vx = chassis_vx / kWheelRadius;
 		const float vy = chassis_vy / kWheelRadius;
-		const float wz = (msg.chassis_mode == topic::remote_to::ChassisMode::Spin) ? chassis_w : 0.0f;
+		const float wz = chassis_wz;
 
 		target[0] = (-vx + vy) * kSqrt2 + wz;
 		target[1] = (-vx - vy) * kSqrt2 + wz;
