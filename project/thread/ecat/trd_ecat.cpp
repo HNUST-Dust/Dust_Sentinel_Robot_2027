@@ -67,8 +67,8 @@ using Slave = ::ecat::EthercatSlave<PdoOutputs, PdoInputs>;
 static_assert(Slave::Profile::kRxBytes == 256);
 static_assert(Slave::Profile::kTxBytes == 256);
 
-static Thread<4096>   thread_  {};
-static Slave          slave_   {};
+static Thread<4096> thread_  {};
+static Slave        slave_   {};
 
 static constexpr uint32_t kCommandTimeoutMs = 100;    // 导航命令停更超时 ms
 static uint8_t  status_sequence_ = 0;                 // 状态聚合帧序号

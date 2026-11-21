@@ -9,6 +9,7 @@
  *
  */
 
+#include "log.hpp"
 #include "sbus.hpp"
 
 namespace sbus {
@@ -24,6 +25,8 @@ void FillOutputData(const OutputData& in, topic::remote_to::Message& out)
     out.chassis_mode = (in.sw.sc == ThreePos::Up) ? topic::remote_to::ChassisMode::Spin : topic::remote_to::ChassisMode::Normal;
 	
     out.custom1      = (in.sw.sb == ThreePos::Up) ? topic::remote_to::StartMode::On     : topic::remote_to::StartMode::Off;
+
+	DUST_LOG_DBG("sbus", "%d,%d,%d,%d", (double)in.ch.chassisx, (double)in.ch.chassisy, (double)in.ch.yaw, in.sw.sa);
 }
 
 } // namespace sbus

@@ -140,7 +140,7 @@ config TRD_REMOTE
 config TRD_ECAT
     bool "HPM5E31 EtherCAT slave"
     default y
-    depends on DUST_ECAT_HAL_HPM
+    select DUST_ECAT_HAL_HPM
     select DUST_COM_ETHERCAT
     select DUST_DEV_ECAT_PHY_RTL8201F
     select DUST_ECAT_SII_FLASH_READONLY
@@ -151,7 +151,6 @@ config TRD_ECAT
 config TRD_TEST
     bool "IMU attitude diagnosis"
     default n
-    select TRD_IMU
     help
       Enable IMU raw and attitude debug output for drift diagnosis.
 

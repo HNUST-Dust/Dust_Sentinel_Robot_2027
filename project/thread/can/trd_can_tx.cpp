@@ -86,7 +86,7 @@ static TaskResult Task(void* context)
 		return TaskResult::Continue;
 	}
 
-	for (std::size_t i = 0; i < kCanCount; ++i) 
+	for (std::size_t i = 0; i < kCanCount; ++i)
 	{
 		if (events_[i].state == K_POLL_STATE_MSGQ_DATA_AVAILABLE) {
 			SendPending(channels_[i]);
