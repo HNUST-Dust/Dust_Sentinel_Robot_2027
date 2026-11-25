@@ -35,71 +35,7 @@ config USE_CMD_SHELL
 
 # ============================================================================
 
-# =================               TRD_CAN_TX              ====================
-
-config TRD_CAN_TX
-    bool "CAN TX thread"
-    default y
-    select DUST_COM_CAN
-    select DUST_TPC_TO_CAN_TX
-    select POLL
-    help
-      Enable CAN TX thread.
-
-# ============================================================================
-
-# =================               TRD_CHASSIS              ====================
-
-config TRD_CHASSIS
-    bool "Chassis thread"
-    default y
-    select DUST_MOD_DEV_MOTOR_DJI
-    select DUST_CTL_PID
-    select DUST_FLT_LPF
-    select DUST_MON_DTMETER
-    select DUST_TPC_TO_CAN_TX
-    select DUST_MON_STALLWATCH
-    select DUST_TPC_REMOTE_TO
-    help
-      Enable omni chassis thread (remote velocity -> inverse kinematics -> C620 current).
-
-# ============================================================================
-
 # =================               TRD_IMU                  ====================
-
-config TRD_YAW
-    bool "Yaw motor initialization"
-    default y
-    select TRD_CAN_TX
-    select DUST_MOD_DEV_MOTOR_DM
-    select DUST_MATH_ANGLE
-    select DUST_MON_DTMETER
-    select DUST_MON_STALLWATCH
-    help
-      Coordinate big yaw on CAN1 and small yaw on CAN0 using IMU world yaw
-      and motor joint angles, with small yaw travel limits.
-
-config TRD_PITCH_UP
-    bool "Up pitch motor"
-    default y
-    select TRD_CAN_TX
-    select DUST_MOD_DEV_MOTOR_DM
-    select DUST_MATH_ANGLE
-    select DUST_MON_DTMETER
-    select DUST_MON_STALLWATCH
-    help
-      Enable up pitch (0x04/0x14) on CAN0, IMU angle loop with gravity feedforward.
-
-config TRD_PITCH_DOWN
-    bool "Down pitch motor"
-    default y
-    select TRD_CAN_TX
-    select DUST_MOD_DEV_MOTOR_DM
-    select DUST_MATH_ANGLE
-    select DUST_MON_DTMETER
-    select DUST_MON_STALLWATCH
-    help
-      Enable down pitch (0x02/0x12) on CAN0, motor angle loop with mechanical limits.
 
 config TRD_IMU
     bool "IMU thread"
@@ -108,18 +44,6 @@ config TRD_IMU
     select DUST_MOD_DEV_IMU_ICM42688P
     help
       Enable IMU acquisition and attitude publishing thread.
-
-# ============================================================================
-
-# =================               TRD_GPIO                 ====================
-
-config TRD_GPIO
-    bool "GPIO thread task"
-    default n
-    select DUST_DEV_GPIO_OUTPUT
-    select DUST_CTL_TIMER
-    help
-      Enable the GPIO/output indicator thread.
 
 # ============================================================================
 
@@ -135,7 +59,7 @@ config TRD_REMOTE
 
 # ============================================================================
 
-# =================               TRD_TEST                ====================
+# =================               TRD_ECAT                ====================
 
 config TRD_ECAT
     bool "HPM5E31 EtherCAT slave"
@@ -147,6 +71,10 @@ config TRD_ECAT
     help
       Enable a 1 ms EtherCAT task with RTL8201F on port 0; port 1 has no PHY.
       Each PDO direction contains 64 uint32_t words (256 bytes).
+
+# ============================================================================
+
+# =================               TRD_TEST                ====================
 
 config TRD_TEST
     bool "IMU attitude diagnosis"
