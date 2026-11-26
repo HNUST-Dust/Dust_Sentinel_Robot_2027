@@ -1,8 +1,8 @@
 /**
  * @file pdo_layout.hpp
  * @author qingyu
- * @brief EtherCAT PDO 布局：双向 256 B，本版不含电机
- * @version 1.1
+ * @brief EtherCAT PDO 布局：双向 256 B，TxPDO 含四路底盘电机反馈
+ * @version 1.3
  * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
@@ -28,7 +28,8 @@ static constexpr uint16_t kPdoBytes       		 = 256;
 // 帧内偏移
 static constexpr uint16_t kRemoteOffset          = 34;
 static constexpr uint16_t kImuOffset             = 62;
-static constexpr uint16_t kMotorCommandOffset    = 48;
+static constexpr uint16_t kMotorFeedbackOffset   = 112;
+static constexpr uint16_t kMotorCommandOffset    = 38;
 static constexpr uint16_t kDeviceOperationOffset = 176;
 static constexpr uint16_t kDiagnosticOffset      = 208;
 
@@ -81,6 +82,17 @@ struct ImuFeedback
 };
 
 /**
+ * @brief TxPDO 单电机反馈（每槽 12 B）
+ */
+struct MotorFeedback
+{
+    uint16_t id;                       // 槽位号 0..3
+    uint16_t status;                   // bit0 在线；bit1 故障
+    float    omega;                    // 轮角速度 rad/s
+    float    current;                  // 实际电流 A
+};
+
+/**
  * @brief RxPDO 头：上位机命令
  */
 struct CommandHeader
@@ -98,6 +110,14 @@ struct CommandHeader
     uint32_t compute_time_us;          // 主站控制计算耗时，诊断用
     uint16_t flags;                    // bit0 请求 arm；bit1 请求 disarm
     uint16_t enable_mask;              // 使能掩码；本版忽略
+};
+
+/**
+ * @brief 底盘电流命令（偏移 38，8 B）：一帧 C620 控制帧，从站原样转发到 CAN 0x200
+ */
+struct ChassisCommand
+{
+    int16_t current[4];                // 四轮目标电流原始值，槽 0–3 ↔ CAN 0x201–0x204
 };
 
 /**
@@ -119,15 +139,18 @@ struct PdoInputs
     FeedbackHeader header;
     RemoteFeedback remote;
     ImuFeedback    imu;
-    uint8_t        padding[144];           // 补齐到 256 B
+    MotorFeedback  motor_feedback[4];      // 槽 0–3 对应 CAN ID 0x201–0x204
+    uint8_t        padding[96];            // 补齐到 256 B
 };
 
 /**
- * @brief 命令接收帧（主站 → 从站）：256 B 平铺，与上位机一致
+ * @brief RxPDO：上位机 → 下位机，256 B
  */
 struct PdoOutputs
 {
-    uint8_t data[kPdoBytes];
+    CommandHeader  header;              	// 偏移 0
+    ChassisCommand chassis_command;     	// 偏移 38
+    uint8_t        reserved[210];       	// 偏移 46
 };
 
 #pragma pack(pop)
@@ -142,7 +165,9 @@ static_assert(std::is_trivially_copyable_v<DiagnosticRequest>);
 static_assert(sizeof(FeedbackHeader) == 34);
 static_assert(sizeof(RemoteFeedback) == 28);
 static_assert(sizeof(ImuFeedback) == 50);
+static_assert(sizeof(MotorFeedback) == 12);
 static_assert(sizeof(CommandHeader) == 38);
+static_assert(sizeof(ChassisCommand) == 8);
 static_assert(sizeof(DiagnosticRequest) == 16);
 
 static_assert(sizeof(PdoInputs) == kPdoBytes);
@@ -150,5 +175,6 @@ static_assert(sizeof(PdoOutputs) == kPdoBytes);
 
 static_assert(offsetof(PdoInputs, remote) == kRemoteOffset);
 static_assert(offsetof(PdoInputs, imu) == kImuOffset);
+static_assert(offsetof(PdoInputs, motor_feedback) == kMotorFeedbackOffset);
 
 } // namespace instance::ecat

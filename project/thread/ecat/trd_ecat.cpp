@@ -2,7 +2,7 @@
  * @file trd_ecat.cpp
  * @author qingyu
  * @brief HPM5E31 EtherCAT PDO 组帧与命令接收
- * @version 0.3
+ * @version 0.6
  * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
@@ -23,6 +23,8 @@
 #include "thread.hpp"
 #include "remote_to.hpp"
 #include "imu_to.hpp"
+#include "chassis.hpp"
+#include "to_can_tx.hpp"
 
 namespace instance::ecat {
 
@@ -70,6 +72,7 @@ static Thread<4096> thread_  {};
 static Slave        slave_   {};
 
 static constexpr uint32_t kCommandTimeoutMs = 100;    // 命令停更超时 ms
+static constexpr uint16_t kMotorCommandId   = 0x200;  // C620 控制帧 ID
 
 static uint32_t boot_id_           = 0;               // 本次上电标识
 static uint32_t feedback_seq_      = 0;               // 回传帧序号
@@ -77,6 +80,7 @@ static uint32_t last_sm2_count_    = 0;               // 最近一次 SM2 收帧
 static uint32_t last_command_ms_   = 0;               // 最近一次有效命令时间 ms
 static uint32_t last_command_seq_  = 0;               // 最近一次有效命令序号
 static uint16_t accepted_session_  = 0;               // 当前接纳的主机会话
+static uint32_t can_tx_version_    = 0;               // 发往 can_tx 的序号
 
 static topic::remote_to::Message remote_msg_ {};      // 最近一帧遥控数据
 static topic::imu_to::Message    imu_msg_    {};      // 最近一帧 IMU 数据
@@ -133,7 +137,7 @@ static uint16_t PackControls(const topic::remote_to::Message& msg)
 }
 
 /**
- * @brief 组装本拍 TxPDO：头 + 遥控 + IMU，电机区保持零
+ * @brief 组装本拍 TxPDO：头 + 遥控 + IMU + 四路底盘电机反馈
  * @param inputs 待发送的 PDO
  */
 static void FillInputs(PdoInputs& inputs)
@@ -170,7 +174,17 @@ static void FillInputs(PdoInputs& inputs)
         inputs.imu.accel[i] = imu_msg_.accel[i];
     }
 
-    inputs.imu.flags       = (imu_msg_.version != 0) ? 1u : 0u;
+    inputs.imu.flags = (imu_msg_.version != 0) ? 1u : 0u;
+
+    for (uint8_t slot = 0; slot < 4; ++slot)
+    {
+        const auto fb = instance::chassis::chassis_.Read(slot);
+
+        inputs.motor_feedback[slot].id      = slot;
+        inputs.motor_feedback[slot].status  = (fb.flags & 0x0001u);
+        inputs.motor_feedback[slot].omega   = fb.omega;
+        inputs.motor_feedback[slot].current = fb.effort;
+    }
 }
 
 /**
@@ -181,33 +195,12 @@ static void FillInputs(PdoInputs& inputs)
  */
 static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool operational)
 {
-    // 下行帧是 256 B 平铺缓冲；不校验头部，按 0..255 测试图案核对整帧
-    CommandHeader header {};
-
-    std::memcpy(&header, outputs.data, sizeof(header));
+    // 下行帧按上位机布局直读
+    const CommandHeader& header = outputs.header;
 
     if (sm2_count != last_sm2_count_)
     {
         last_sm2_count_ = sm2_count;
-
-        // 每帧校验整帧是否为 0..255 测试图案并打印结果
-        uint16_t bad_index = kPdoBytes;
-        uint8_t  bad_value = 0;
-
-        for (uint16_t i = 0; i < kPdoBytes; ++i)
-        {
-            if (outputs.data[i] != static_cast<uint8_t>(i)) {
-                bad_index = i;
-                bad_value = outputs.data[i];
-                break;
-            }
-        }
-
-        if (bad_index == kPdoBytes) {
-            DUST_LOG_DBG("ecat_pattern", "rx pattern 0..255 ok");
-        } else {
-            DUST_LOG_DBG("ecat_pattern", "rx pattern mismatch i=%u value=0x%02x", static_cast<unsigned>(bad_index), static_cast<unsigned>(bad_value));
-        }
 
         if (operational) {
             accepted_session_ = header.host_session;
@@ -221,6 +214,46 @@ static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool op
     }
 
     DUST_LOG_DBG("ecat_cmd", "%d,%d,%d,%d", static_cast<int>(accepted_session_), static_cast<int>(last_command_seq_), static_cast<int>(feedback_seq_), static_cast<int>(accepted_session_ != 0));
+}
+
+/**
+ * @brief 把本拍底盘电流命令发布给 can_tx 线程；无有效会话时发零电流
+ * @param outputs 主站下发的 PDO
+ */
+static void PublishChassisCommand(const PdoOutputs& outputs)
+{
+    topic::to_can_tx::Message msg {};
+
+    msg.tx_id   = kMotorCommandId;
+    msg.version = ++can_tx_version_;
+
+    if (accepted_session_ != 0)
+    {
+        for (uint8_t slot = 0; slot < 4; ++slot)
+        {
+            const uint16_t raw = static_cast<uint16_t>(outputs.chassis_command.current[slot]);
+
+            msg.data[slot * 2]     = static_cast<uint8_t>(raw >> 8);
+            msg.data[slot * 2 + 1] = static_cast<uint8_t>(raw & 0xFF);
+        }
+    }
+
+    {
+        const int16_t raw0 = static_cast<int16_t>((static_cast<uint16_t>(msg.data[0]) << 8) | static_cast<uint16_t>(msg.data[1]));
+        const int16_t raw1 = static_cast<int16_t>((static_cast<uint16_t>(msg.data[2]) << 8) | static_cast<uint16_t>(msg.data[3]));
+        const int16_t raw2 = static_cast<int16_t>((static_cast<uint16_t>(msg.data[4]) << 8) | static_cast<uint16_t>(msg.data[5]));
+        const int16_t raw3 = static_cast<int16_t>((static_cast<uint16_t>(msg.data[6]) << 8) | static_cast<uint16_t>(msg.data[7]));
+
+        // C620：raw ±16384 对应 ±20 A
+        const float a0 = static_cast<float>(raw0) * 20.0f / 16384.0f;
+        const float a1 = static_cast<float>(raw1) * 20.0f / 16384.0f;
+        const float a2 = static_cast<float>(raw2) * 20.0f / 16384.0f;
+        const float a3 = static_cast<float>(raw3) * 20.0f / 16384.0f;
+
+        DUST_LOG_DBG("ecat_motor", "%.2f,%.2f,%.2f,%.2f", static_cast<double>(a0), static_cast<double>(a1), static_cast<double>(a2), static_cast<double>(a3));
+    }
+
+    k_msgq_put(&user_can1_msgq, &msg, K_NO_WAIT);
 }
 
 /**
@@ -248,12 +281,13 @@ static TaskResult Task(void* context)
     slave_.SetInputs(inputs);
     outputs = slave_.Outputs();
 
-    const uint32_t sm2_count  = slave_.Sm2Count();
-    const bool    operational = link_up && slave_.State() == AlState::Op;
+    const uint32_t sm2_count   = slave_.Sm2Count();
+    const bool     operational = link_up && slave_.State() == AlState::Op;
 
     irq_unlock(key);
 
     DecodeCommand(outputs, sm2_count, operational);
+    PublishChassisCommand(outputs);
 
     k_mutex_lock(&pdo_mutex_, K_FOREVER);
     outputs_ = outputs;

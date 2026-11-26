@@ -35,6 +35,19 @@ config USE_CMD_SHELL
 
 # ============================================================================
 
+# =================               TRD_CAN_TX              ====================
+
+config TRD_CAN_TX
+    bool "CAN TX thread"
+    default y
+    select DUST_COM_CAN
+    select DUST_TPC_TO_CAN_TX
+    select POLL
+    help
+      Enable CAN TX thread.
+
+# ============================================================================
+
 # =================               TRD_IMU                  ====================
 
 config TRD_IMU
@@ -68,6 +81,8 @@ config TRD_ECAT
     select DUST_COM_ETHERCAT
     select DUST_DEV_ECAT_PHY_RTL8201F
     select DUST_ECAT_SII_FLASH_READONLY
+    select DUST_MOD_DEV_CHASSIS
+    select TRD_CAN_TX
     help
       Enable a 1 ms EtherCAT task with RTL8201F on port 0; port 1 has no PHY.
       Each PDO direction contains 64 uint32_t words (256 bytes).

@@ -8,3 +8,15 @@
 #     default n
 #     help
 #       XXX 说明。
+
+# ============================================================================
+
+# =================            DUST_MOD_DEV_CHASSIS        ====================
+
+config DUST_MOD_DEV_CHASSIS
+    bool "Chassis motor feedback"
+    default n
+    select DUST_COM_CAN
+    select DUST_MOD_DEV_MOTOR_DJI
+    help
+      Assemble four C620 motors on CAN1 and expose feedback snapshots.
