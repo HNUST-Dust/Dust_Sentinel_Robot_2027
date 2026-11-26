@@ -18,8 +18,6 @@
 #include "ethercat.hpp"
 #include "rtl8201f/phy_rtl8201f.hpp"
 #include "log.hpp"
-#include "shell_cmd.hpp"
-#include "token.hpp"
 #include "thread.hpp"
 #include "remote_to.hpp"
 #include "imu_to.hpp"
@@ -72,6 +70,7 @@ static Thread<4096> thread_  {};
 static Slave        slave_   {};
 
 static constexpr uint32_t kCommandTimeoutMs = 100;    // 命令停更超时 ms
+static constexpr uint32_t kLinkPollMs       = 50;     // 链路检查周期 ms
 static constexpr uint16_t kMotorCommandId   = 0x200;  // C620 控制帧 ID
 
 static uint32_t boot_id_           = 0;               // 本次上电标识
@@ -81,6 +80,10 @@ static uint32_t last_command_ms_   = 0;               // 最近一次有效命�
 static uint32_t last_command_seq_  = 0;               // 最近一次有效命令序号
 static uint16_t accepted_session_  = 0;               // 当前接纳的主机会话
 static uint32_t can_tx_version_    = 0;               // 发往 can_tx 的序号
+static uint32_t last_rx_us_        = 0;               // 最近一次收到下行帧的时刻
+static uint32_t last_tick_us_      = 0;               // 最近一拍开始时刻
+static uint32_t last_link_us_      = 0;               // 最近一次链路检查时刻
+static bool     link_up_           = false;           // 链路是否在位
 
 static topic::remote_to::Message remote_msg_ {};      // 最近一帧遥控数据
 static topic::imu_to::Message    imu_msg_    {};      // 最近一帧 IMU 数据
@@ -200,7 +203,16 @@ static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool op
 
     if (sm2_count != last_sm2_count_)
     {
+        const uint32_t frames = sm2_count - last_sm2_count_;
+
         last_sm2_count_ = sm2_count;
+
+        const uint32_t now_us = NowUs();
+        const uint32_t dt_us  = (last_rx_us_ != 0) ? (now_us - last_rx_us_) : 0;
+
+        last_rx_us_ = now_us;
+
+        DUST_LOG_DBG("ecat_rx_dt", "%d,%d", static_cast<int>(dt_us), static_cast<int>(frames));
 
         if (operational) {
             accepted_session_ = header.host_session;
@@ -265,15 +277,32 @@ static TaskResult Task(void* context)
 {
     (void)context;
 
+    const uint32_t tick_us = NowUs();
+    const uint32_t gap_us  = (last_tick_us_ != 0) ? (tick_us - last_tick_us_) : 0;
+
+    last_tick_us_ = tick_us;
+
     PdoInputs  inputs  {};
     PdoOutputs outputs {};
 
     ReadTopics();
-    FillInputs(inputs);
-    slave_.Poll();
+    const uint32_t t_topics = NowUs();
 
-    // 直接复用 PHY 链路检查，拔线后不等待 100 ms 命令停更超时。
-    const bool link_up = slave_.LinkUp(0);
+    FillInputs(inputs);
+    const uint32_t t_fill = NowUs();
+
+    slave_.Poll();
+    const uint32_t t_poll = NowUs();
+
+    // 链路检查每 50 ms 一次，其余拍沿用上次结果
+    if (last_link_us_ == 0 || (tick_us - last_link_us_) >= kLinkPollMs * 1000u)
+    {
+        link_up_ = slave_.LinkUp(0);
+        last_link_us_ = tick_us;
+    }
+
+    const bool link_up = link_up_;
+    const uint32_t t_link = NowUs();
 
     // PDO 缓冲与 PDI ISR 共用，仅在复制期间屏蔽中断。
     const unsigned int key = irq_lock();
@@ -285,37 +314,28 @@ static TaskResult Task(void* context)
     const bool     operational = link_up && slave_.State() == AlState::Op;
 
     irq_unlock(key);
+    const uint32_t t_irq = NowUs();
 
     DecodeCommand(outputs, sm2_count, operational);
+    const uint32_t t_decode = NowUs();
+
     PublishChassisCommand(outputs);
+    const uint32_t t_publish = NowUs();
 
     k_mutex_lock(&pdo_mutex_, K_FOREVER);
     outputs_ = outputs;
     inputs_  = inputs;
     k_mutex_unlock(&pdo_mutex_);
 
+    const uint32_t end_us = NowUs();
+
+    // gap,total,topics,fill,poll,link,irq,decode,publish,store（µs）
+    DUST_LOG_DBG("ecat_tick_dt", "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", static_cast<int>(gap_us), static_cast<int>(end_us - tick_us),
+                 static_cast<int>(t_topics - tick_us), static_cast<int>(t_fill - t_topics), static_cast<int>(t_poll - t_fill),
+                 static_cast<int>(t_link - t_poll), static_cast<int>(t_irq - t_link), static_cast<int>(t_decode - t_irq),
+                 static_cast<int>(t_publish - t_decode), static_cast<int>(end_us - t_publish));
+
     return TaskResult::Continue;
-}
-
-/**
- * @brief EtherCAT 故障报告命令
- * @param args 子命令及参数
- */
-static void EcatCommand(uint8_t* args)
-{
-    const char* command = nullptr;
-    uint8_t*    rest    = shell::NextToken(args, command);
-
-    if (std::strcmp(command, "fault") != 0) {
-        DUST_LOG_RAW("usage: ecat fault [clear]");
-    } else if (*rest == '\0') {
-        DUST_LOG_RAW("%s", slave_.RequestFaultReport() ? "ecat: saved fault report requested" : "ecat: no saved fault");
-    } else if (std::strcmp(reinterpret_cast<const char*>(rest), "clear") == 0) {
-        slave_.ClearFaultReport();
-        DUST_LOG_RAW("ecat: fault clear requested");
-    } else {
-        DUST_LOG_RAW("usage: ecat fault [clear]");
-    }
 }
 
 /**
@@ -350,7 +370,6 @@ static bool thread_start()
     return true;
 }
 
-REGISTER_SHELL_CMD("ecat", "ecat fault [clear]", EcatCommand);
 REGISTER_INIT(thread_init, LateInit, High, HaltOnFail, nullptr, "ecat_init");
 REGISTER_THREAD(thread_start, LateThread, ContinueOnFail, "ecat_start");
 

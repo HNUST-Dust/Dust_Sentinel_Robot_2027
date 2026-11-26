@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstddef>
+#include <zephyr/kernel.h>
 #include "thread.hpp"
 #include "Init_entry.hpp"
 #include "to_can_tx.hpp"
@@ -44,12 +45,23 @@ static CanTxChannel channels_[] {
 
 static constexpr std::size_t kCanCount = sizeof(channels_) / sizeof(channels_[0]);
 static k_poll_event events_[kCanCount] {};
+static uint32_t last_tx_us_[kCanCount] {};      // 每路最近一次发送时刻
+
+/**
+ * @brief 读取当前 MCU 本地时刻（µs，32 位）
+ * @return µs 计数
+ */
+static uint32_t NowUs()
+{
+	return static_cast<uint32_t>(k_cyc_to_us_floor64(k_cycle_get_64()));
+}
 
 /**
  * @brief 处理已就绪通道中的待发送消息
  * @param channel 对应的 CAN 实例、发送队列和日志名称
+ * @param index   通道下标
  */
-static void SendPending(CanTxChannel& channel)
+static void SendPending(CanTxChannel& channel, std::size_t index)
 {
 	topic::to_can_tx::Message msg{};
 
@@ -61,6 +73,13 @@ static void SendPending(CanTxChannel& channel)
 		};
 
 		std::memcpy(tx.data, msg.data, 8);
+
+		const uint32_t now_us = NowUs();
+		const uint32_t dt_us  = (last_tx_us_[index] != 0) ? (now_us - last_tx_us_[index]) : 0;
+
+		last_tx_us_[index] = now_us;
+
+		DUST_LOG_DBG("can_tx_dt", "%d,%d", static_cast<int>(msg.tx_id), static_cast<int>(dt_us));
 
 		if (!channel.can.Send(&tx, K_MSEC(1))) {
 			DUST_LOG_ERR("%s tx fail id=0x%x", channel.name, static_cast<unsigned>(tx.id));
@@ -90,7 +109,7 @@ static TaskResult Task(void* context)
 	for (std::size_t i = 0; i < kCanCount; ++i)
 	{
 		if (events_[i].state == K_POLL_STATE_MSGQ_DATA_AVAILABLE) {
-			SendPending(channels_[i]);
+			SendPending(channels_[i], i);
 		}
 	}
 
