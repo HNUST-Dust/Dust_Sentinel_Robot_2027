@@ -2,8 +2,8 @@
  * @file pdo_layout.hpp
  * @author qingyu
  * @brief EtherCAT PDO 布局：双向 256 B，本版不含电机
- * @version 1.0
- * @date 2026-11-25
+ * @version 1.1
+ * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
  *

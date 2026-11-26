@@ -2,8 +2,8 @@
  * @file trd_ecat.cpp
  * @author qingyu
  * @brief HPM5E31 EtherCAT PDO 组帧与命令接收
- * @version 0.2
- * @date 2026-11-25
+ * @version 0.3
+ * @date 2026-11-26
  *
  * @copyright Copyright (c) 2026
  *
@@ -204,10 +204,9 @@ static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool op
         }
 
         if (bad_index == kPdoBytes) {
-            DUST_LOG_OK("ecat: rx pattern 0..255 ok");
+            DUST_LOG_DBG("ecat_pattern", "rx pattern 0..255 ok");
         } else {
-            DUST_LOG_WRN("ecat: rx pattern mismatch i=%u value=0x%02x",
-                         static_cast<unsigned>(bad_index), static_cast<unsigned>(bad_value));
+            DUST_LOG_DBG("ecat_pattern", "rx pattern mismatch i=%u value=0x%02x", static_cast<unsigned>(bad_index), static_cast<unsigned>(bad_value));
         }
 
         if (operational) {
