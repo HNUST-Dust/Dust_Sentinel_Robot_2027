@@ -128,16 +128,12 @@ struct PdoInputs
 } __attribute__((packed));
 
 /**
- * @brief 命令接收帧（主站 → 从站）
+ * @brief 命令接收帧（主站 → 从站）：256 B 平铺，与上位机一致
  */
 struct PdoOutputs
 {
-    CommandHeader     header;
-    uint8_t           motor_command[128];    // 8 槽 × 16 B，本版预留
-    uint8_t           device_operation[32];  // 本版预留
-    DiagnosticRequest diagnostic;
-    uint8_t           reserved[32];
-} __attribute__((packed));
+    uint8_t data[kPdoBytes];
+};
 
 static_assert(sizeof(float) == 4);
 static_assert(std::is_trivially_copyable_v<FeedbackHeader>);
@@ -158,8 +154,5 @@ static_assert(sizeof(PdoOutputs) == kPdoBytes);
 static_assert(offsetof(PdoInputs, remote) == kRemoteOffset);
 static_assert(offsetof(PdoInputs, imu) == kImuOffset);
 static_assert(offsetof(PdoInputs, motor_feedback) == kMotorFeedbackOffset);
-static_assert(offsetof(PdoOutputs, motor_command) == kMotorCommandOffset);
-static_assert(offsetof(PdoOutputs, device_operation) == kDeviceOperationOffset);
-static_assert(offsetof(PdoOutputs, diagnostic) == kDiagnosticOffset);
 
 } // namespace instance::ecat

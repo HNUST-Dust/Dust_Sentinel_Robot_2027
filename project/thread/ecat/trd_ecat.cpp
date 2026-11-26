@@ -77,6 +77,7 @@ static uint32_t last_sm2_count_    = 0;               // 最近一次 SM2 收帧
 static uint32_t last_command_ms_   = 0;               // 最近一次有效命令时间 ms
 static uint32_t last_command_seq_  = 0;               // 最近一次有效命令序号
 static uint16_t accepted_session_  = 0;               // 当前接纳的主机会话
+static bool     pattern_ok_prev_   = false;           // 上一次 0..255 测试图案校验结果
 
 static topic::remote_to::Message remote_msg_ {};      // 最近一帧遥控数据
 static topic::imu_to::Message    imu_msg_    {};      // 最近一帧 IMU 数据
@@ -182,16 +183,43 @@ static void FillInputs(PdoInputs& inputs)
  */
 static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool operational)
 {
-    const CommandHeader& header = outputs.header;
+    // 下行帧是 256 B 平铺缓冲；不校验头部，按 0..255 测试图案核对整帧
+    CommandHeader header {};
+
+    std::memcpy(&header, outputs.data, sizeof(header));
 
     if (sm2_count != last_sm2_count_)
     {
         last_sm2_count_ = sm2_count;
 
-        const bool header_ok = header.magic == kCommandMagic && header.byte_length == kPdoBytes && 
-							   header.slot_map_version == kSlotMapVersion && header.mcu_boot_id_echo == boot_id_;
+        // 校验整帧是否为 0..255 测试图案，只在结果变化时打印
+        uint16_t bad_index = kPdoBytes;
+        uint8_t  bad_value = 0;
 
-        if (header_ok && operational) {
+        for (uint16_t i = 0; i < kPdoBytes; ++i)
+        {
+            if (outputs.data[i] != static_cast<uint8_t>(i)) {
+                bad_index = i;
+                bad_value = outputs.data[i];
+                break;
+            }
+        }
+
+        const bool pattern_ok = (bad_index == kPdoBytes);
+
+        if (pattern_ok != pattern_ok_prev_)
+        {
+            pattern_ok_prev_ = pattern_ok;
+
+            if (pattern_ok) {
+                DUST_LOG_OK("ecat: rx pattern 0..255 ok");
+            } else {
+                DUST_LOG_WRN("ecat: rx pattern mismatch i=%u value=0x%02x",
+                             static_cast<unsigned>(bad_index), static_cast<unsigned>(bad_value));
+            }
+        }
+
+        if (operational) {
             accepted_session_ = header.host_session;
             last_command_seq_ = header.command_seq;
             last_command_ms_  = k_uptime_get_32();
