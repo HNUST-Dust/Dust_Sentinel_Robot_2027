@@ -77,7 +77,6 @@ static uint32_t last_sm2_count_    = 0;               // 最近一次 SM2 收帧
 static uint32_t last_command_ms_   = 0;               // 最近一次有效命令时间 ms
 static uint32_t last_command_seq_  = 0;               // 最近一次有效命令序号
 static uint16_t accepted_session_  = 0;               // 当前接纳的主机会话
-static bool     pattern_ok_prev_   = false;           // 上一次 0..255 测试图案校验结果
 
 static topic::remote_to::Message remote_msg_ {};      // 最近一帧遥控数据
 static topic::imu_to::Message    imu_msg_    {};      // 最近一帧 IMU 数据
@@ -150,17 +149,17 @@ static void FillInputs(PdoInputs& inputs)
     inputs.header.accepted_host_session = accepted_session_;
     inputs.header.status_flags          = (accepted_session_ != 0) ? 1u : 0u;
 
-    inputs.remote.source_seq     = remote_msg_.version;
-    inputs.remote.sample_tick_us = remote_msg_.sample_us;
-    inputs.remote.axis[0]        = remote_msg_.chassisx;
-    inputs.remote.axis[1]        = remote_msg_.chassisy;
-    inputs.remote.axis[2]        = remote_msg_.yaw;
-    inputs.remote.axis[3]        = remote_msg_.pitch;
-    inputs.remote.controls       = PackControls(remote_msg_);
-    inputs.remote.status         = (remote_msg_.version != 0) ? 1u : 0u;
+    inputs.remote.source_seq     		= remote_msg_.version;
+    inputs.remote.sample_tick_us 		= remote_msg_.sample_us;
+    inputs.remote.axis[0]        		= remote_msg_.chassisx;
+    inputs.remote.axis[1]        		= remote_msg_.chassisy;
+    inputs.remote.axis[2]        		= remote_msg_.yaw;
+    inputs.remote.axis[3]        		= remote_msg_.pitch;
+    inputs.remote.controls       		= PackControls(remote_msg_);
+    inputs.remote.status         		= (remote_msg_.version != 0) ? 1u : 0u;
 
-    inputs.imu.source_seq     = imu_msg_.version;
-    inputs.imu.sample_tick_us = imu_msg_.sample_us;
+    inputs.imu.source_seq     			= imu_msg_.version;
+    inputs.imu.sample_tick_us 			= imu_msg_.sample_us;
 
     for (uint8_t i = 0; i < 4; ++i) {
         inputs.imu.quaternion[i] = imu_msg_.quaternion[i];
@@ -171,7 +170,6 @@ static void FillInputs(PdoInputs& inputs)
         inputs.imu.accel[i] = imu_msg_.accel[i];
     }
 
-    inputs.imu.temperature = imu_msg_.temperature;
     inputs.imu.flags       = (imu_msg_.version != 0) ? 1u : 0u;
 }
 
@@ -192,7 +190,7 @@ static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool op
     {
         last_sm2_count_ = sm2_count;
 
-        // 校验整帧是否为 0..255 测试图案，只在结果变化时打印
+        // 每帧校验整帧是否为 0..255 测试图案并打印结果
         uint16_t bad_index = kPdoBytes;
         uint8_t  bad_value = 0;
 
@@ -205,18 +203,11 @@ static void DecodeCommand(const PdoOutputs& outputs, uint32_t sm2_count, bool op
             }
         }
 
-        const bool pattern_ok = (bad_index == kPdoBytes);
-
-        if (pattern_ok != pattern_ok_prev_)
-        {
-            pattern_ok_prev_ = pattern_ok;
-
-            if (pattern_ok) {
-                DUST_LOG_OK("ecat: rx pattern 0..255 ok");
-            } else {
-                DUST_LOG_WRN("ecat: rx pattern mismatch i=%u value=0x%02x",
-                             static_cast<unsigned>(bad_index), static_cast<unsigned>(bad_value));
-            }
+        if (bad_index == kPdoBytes) {
+            DUST_LOG_OK("ecat: rx pattern 0..255 ok");
+        } else {
+            DUST_LOG_WRN("ecat: rx pattern mismatch i=%u value=0x%02x",
+                         static_cast<unsigned>(bad_index), static_cast<unsigned>(bad_value));
         }
 
         if (operational) {
